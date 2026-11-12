@@ -26,7 +26,7 @@ def command_init(args: argparse.Namespace) -> int:
 
 def command_index(args: argparse.Namespace) -> int:
     config = load_config(args.project_root)
-    stats = index_project(config)
+    stats = index_project(config, full=args.full)
     print_json(stats)
     return 0
 
@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     index_parser = commands.add_parser("index", help="index configured repositories")
     index_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
+    index_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="force a full scan instead of Git commit-diff candidates",
+    )
     index_parser.set_defaults(handler=command_index)
 
     health_parser = commands.add_parser("health", help="show index health")

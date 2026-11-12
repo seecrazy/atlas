@@ -4,7 +4,7 @@ ATLAS 是一个面向超大项目的分层项目知识系统。它把项目组�
 
 ## 当前状态
 
-项目处于 **Phase 1 垂直切片**：单仓/多仓基础索引、Python/TypeScript/JavaScript 基础符号抽取、SQLite 存储、本地 MCP stdio Server、基础 scope token 和审计记录已经可用。
+项目处于 **Phase 2 索引可靠性切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、索引诊断、基础 scope token 和审计记录已经可用。
 
 运行环境要求 Python 3.9+。
 
@@ -26,9 +26,14 @@ atlas init /path/to/project
 atlas index /path/to/project
 atlas health /path/to/project
 
+# 强制全量重建（Git 增量索引跳过时使用）
+atlas index /path/to/project --full
+
 # 启动 MCP stdio server
 atlas serve /path/to/project
 ```
+
+建议把 `.atlas/` 加入目标项目的 `.gitignore`，避免提交本地索引数据库和 scope token。
 
 ### Codex CLI 接入
 

@@ -40,6 +40,13 @@ def health(conn: sqlite3.Connection) -> dict:
     memory_rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM memories GROUP BY status"
     ).fetchall()
+    diagnostic_rows = conn.execute(
+        """
+        SELECT level, COUNT(*) AS count
+        FROM index_diagnostics
+        GROUP BY level
+        """
+    ).fetchall()
     languages = {
         row["language"]: int(row["count"])
         for row in conn.execute("SELECT language, COUNT(*) AS count FROM files GROUP BY language")
@@ -57,6 +64,8 @@ def health(conn: sqlite3.Connection) -> dict:
         "memory_count": scalar("SELECT COUNT(*) FROM memories"),
         "memory_by_status": {row["status"]: int(row["count"]) for row in memory_rows},
         "indexed_languages": languages,
+        "diagnostics": {row["level"]: int(row["count"]) for row in diagnostic_rows},
+        "diagnostic_count": scalar("SELECT COUNT(*) FROM index_diagnostics"),
     }
 
 

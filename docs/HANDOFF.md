@@ -18,7 +18,7 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 
 项目位于 `atlas/` 目录。
 
-已实现 Phase 1：
+已实现 Phase 1 与 Phase 2 第一批能力：
 
 1. `.atlas/config.json` 项目配置。
 2. `.atlas/index.db` SQLite 数据库。
@@ -28,14 +28,17 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 6. MCP stdio 工具。
 7. scope token 与路径过滤。
 8. pytest 测试。
+9. Go / Java 基础符号索引。
+10. Git-aware 提交间增量索引。
+11. 文件级索引诊断。
 
 ## 下一步
 
-1. 实现 git diff-tree 增量索引。
-2. 增加 Go / Java 解析器。
-3. 增加索引诊断报告。
-4. 设计 Router 的请求分类 schema。
-5. 构建 10 个真实调用关系的验收用例。
+1. 设计 Router 的请求分类 schema。
+2. 构建 10 个真实调用关系的验收用例。
+3. 增加 Rust 解析器。
+4. 设计未提交变更的可靠检测策略。
+5. 为 Go/Java parser 增加方法级 receiver 解析。
 
 ## 阅读顺序
 

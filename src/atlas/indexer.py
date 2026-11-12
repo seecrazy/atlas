@@ -7,6 +7,7 @@ import hashlib
 import pathlib
 import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from dataclasses import replace
 
@@ -22,6 +23,8 @@ LANGUAGE_EXTENSIONS = {
     ".jsx": "javascript",
     ".mjs": "javascript",
     ".cjs": "javascript",
+    ".go": "go",
+    ".java": "java",
 }
 
 EXCLUDED_DIRS = {
@@ -61,6 +64,7 @@ class FileRecord:
     mtime: float
     symbols: tuple[Symbol, ...]
     imports: tuple[dict, ...]
+    diagnostics: tuple[dict, ...] = ()
 
 
 def is_excluded(path: pathlib.Path, project_config: ProjectConfig) -> bool:
@@ -84,12 +88,16 @@ def content_digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _diagnostic(level: str, code: str, message: str) -> tuple[dict, ...]:
+    return ({"level": level, "code": code, "message": message},)
+
+
 def extract_python(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
     content = path.read_bytes()
     try:
         text = content.decode("utf-8")
         tree = ast.parse(text, filename=str(path))
-    except (UnicodeDecodeError, SyntaxError):
+    except UnicodeDecodeError as exc:
         return FileRecord(
             path=path.as_posix(),
             language="python",
@@ -98,6 +106,18 @@ def extract_python(path: pathlib.Path, module_name: str) -> tuple[FileRecord, by
             mtime=path.stat().st_mtime,
             symbols=(),
             imports=(),
+            diagnostics=_diagnostic("error", "decode_error", f"file is not valid UTF-8: {exc}"),
+        ), content
+    except SyntaxError as exc:
+        return FileRecord(
+            path=path.as_posix(),
+            language="python",
+            module_name=module_name,
+            content_hash=content_digest(content),
+            mtime=path.stat().st_mtime,
+            symbols=(),
+            imports=(),
+            diagnostics=_diagnostic("error", "python_syntax_error", str(exc)),
         ), content
 
     symbols: list[Symbol] = []
@@ -178,6 +198,7 @@ def extract_ts_js(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byt
             mtime=path.stat().st_mtime,
             symbols=(),
             imports=(),
+            diagnostics=_diagnostic("error", "decode_error", "file is not valid UTF-8"),
         ), content
 
     symbols: list[Symbol] = []
@@ -239,18 +260,215 @@ def extract_ts_js(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byt
     ), content
 
 
+GO_PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_][\w]*)", re.MULTILINE)
+GO_SINGLE_IMPORT_RE = re.compile(r"^\s*import\s+(?:[_\.]\s+)?\"([^\"]+)\"", re.MULTILINE)
+GO_BLOCK_IMPORT_RE = re.compile(r"^\s*import\s*\(([^)]*)\)", re.MULTILINE | re.DOTALL)
+GO_TYPE_RE = re.compile(r"^\s*type\s+([A-Za-z_][\w]*)\s+(?:struct|interface)\b", re.MULTILINE)
+GO_METHOD_RE = re.compile(
+    r"^\s*func\s*\(\s*\w+\s+\*?([A-Za-z_][\w]*)\s*\)\s*([A-Za-z_][\w]*)\s*\(",
+    re.MULTILINE,
+)
+GO_FUNCTION_RE = re.compile(r"^\s*func\s+([A-Za-z_][\w]*)\s*\(", re.MULTILINE)
+GO_VALUE_RE = re.compile(r"^\s*(?:var|const)\s+([A-Za-z_][\w]*)\s*(?:=|\b)", re.MULTILINE)
+
+
+def extract_go(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
+    content = path.read_bytes()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return FileRecord(
+            path=path.as_posix(),
+            language="go",
+            module_name=module_name,
+            content_hash=content_digest(content),
+            mtime=path.stat().st_mtime,
+            symbols=(),
+            imports=(),
+            diagnostics=_diagnostic("error", "decode_error", "file is not valid UTF-8"),
+        ), content
+
+    package_match = GO_PACKAGE_RE.search(text)
+    package = package_match.group(1) if package_match else module_name.replace("/", ".")
+    imports: list[dict] = []
+    for match in GO_SINGLE_IMPORT_RE.finditer(text):
+        imports.append(
+            {
+                "target": match.group(1),
+                "line": text.count("\n", 0, match.start()) + 1,
+                "kind": "import",
+            }
+        )
+    for block in GO_BLOCK_IMPORT_RE.finditer(text):
+        block_start = block.start()
+        for quoted in re.finditer(r"\"([^\"]+)\"", block.group(1)):
+            imports.append(
+                {
+                    "target": quoted.group(1),
+                    "line": text.count("\n", 0, block_start + quoted.start()) + 1,
+                    "kind": "import",
+                }
+            )
+
+    symbols: list[Symbol] = []
+    for match in GO_TYPE_RE.finditer(text):
+        name = match.group(1)
+        symbols.append(
+            Symbol(
+                name=name,
+                qualified_name=f"{package}.{name}",
+                kind="type",
+                start_line=text.count("\n", 0, match.start()) + 1,
+                end_line=text.count("\n", 0, match.start()) + 1,
+                exported=name[0].isupper(),
+            )
+        )
+    for regex, kind in ((GO_FUNCTION_RE, "function"), (GO_VALUE_RE, "variable")):
+        for match in regex.finditer(text):
+            name = match.group(1)
+            symbols.append(
+                Symbol(
+                    name=name,
+                    qualified_name=f"{package}.{name}",
+                    kind=kind,
+                    start_line=text.count("\n", 0, match.start()) + 1,
+                    end_line=text.count("\n", 0, match.start()) + 1,
+                    exported=name[0].isupper(),
+                )
+            )
+    for match in GO_METHOD_RE.finditer(text):
+        receiver = match.group(1)
+        name = match.group(2)
+        parent = f"{package}.{receiver}"
+        symbols.append(
+            Symbol(
+                name=name,
+                qualified_name=f"{parent}.{name}",
+                kind="method",
+                start_line=text.count("\n", 0, match.start()) + 1,
+                end_line=text.count("\n", 0, match.start()) + 1,
+                exported=name[0].isupper(),
+                parent_qualified=parent,
+            )
+        )
+
+    return FileRecord(
+        path=path.as_posix(),
+        language="go",
+        module_name=package,
+        content_hash=content_digest(content),
+        mtime=path.stat().st_mtime,
+        symbols=tuple(symbols),
+        imports=tuple(imports),
+    ), content
+
+
+JAVA_PACKAGE_RE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w.*]+)\s*;", re.MULTILINE)
+JAVA_TYPE_RE = re.compile(
+    r"^\s*((?:public|protected|private|final|abstract|sealed)\s+)*"
+    r"(class|interface|enum)\s+([A-Za-z_$][\w$]*)",
+    re.MULTILINE,
+)
+JAVA_METHOD_RE = re.compile(
+    r"^\s*((?:public|protected|private|static|final|abstract|synchronized|native)\s+)*"
+    r"(?:<[^>]+>\s*)?[\w<>\[\], .?]+\s+([A-Za-z_$][\w$]*)\s*\(",
+    re.MULTILINE,
+)
+
+
+def extract_java(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
+    content = path.read_bytes()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return FileRecord(
+            path=path.as_posix(),
+            language="java",
+            module_name=module_name,
+            content_hash=content_digest(content),
+            mtime=path.stat().st_mtime,
+            symbols=(),
+            imports=(),
+            diagnostics=_diagnostic("error", "decode_error", "file is not valid UTF-8"),
+        ), content
+
+    package_match = JAVA_PACKAGE_RE.search(text)
+    package = package_match.group(1) if package_match else module_name.replace("/", ".")
+    imports = [
+        {
+            "target": match.group(1),
+            "line": text.count("\n", 0, match.start()) + 1,
+            "kind": "import",
+        }
+        for match in JAVA_IMPORT_RE.finditer(text)
+    ]
+
+    types: list[Symbol] = []
+    for match in JAVA_TYPE_RE.finditer(text):
+        name = match.group(3)
+        types.append(
+            Symbol(
+                name=name,
+                qualified_name=f"{package}.{name}",
+                kind=match.group(2),
+                start_line=text.count("\n", 0, match.start()) + 1,
+                end_line=text.count("\n", 0, match.start()) + 1,
+                exported="public" in (match.group(1) or ""),
+            )
+        )
+
+    symbols = list(types)
+    for match in JAVA_METHOD_RE.finditer(text):
+        name = match.group(2)
+        if name in {"if", "for", "while", "switch", "catch", "return", "new", "synchronized"}:
+            continue
+        line = text.count("\n", 0, match.start()) + 1
+        parent = None
+        for symbol in reversed(types):
+            if symbol.start_line <= line:
+                parent = symbol.qualified_name
+                break
+        symbols.append(
+            Symbol(
+                name=name,
+                qualified_name=f"{parent}.{name}" if parent else f"{package}.{name}",
+                kind="method",
+                start_line=line,
+                end_line=line,
+                exported="public" in (match.group(1) or ""),
+                parent_qualified=parent,
+            )
+        )
+
+    return FileRecord(
+        path=path.as_posix(),
+        language="java",
+        module_name=package,
+        content_hash=content_digest(content),
+        mtime=path.stat().st_mtime,
+        symbols=tuple(symbols),
+        imports=tuple(imports),
+    ), content
+
+
 def scan_file(path: pathlib.Path, display_path: pathlib.Path | None = None) -> FileRecord | None:
     language = LANGUAGE_EXTENSIONS.get(path.suffix.lower())
-    if language not in {"python", "typescript", "javascript"}:
+    if language not in {"python", "typescript", "javascript", "go", "java"}:
         return None
     display_path = display_path or path
     module_name = module_name_from_path(display_path)
     if language == "python":
         record, _ = extract_python(path, module_name)
         return replace(record, path=display_path.as_posix())
+    if language == "go":
+        record, _ = extract_go(path, module_name)
+        return replace(record, path=display_path.as_posix())
+    if language == "java":
+        record, _ = extract_java(path, module_name)
+        return replace(record, path=display_path.as_posix())
     record, _ = extract_ts_js(path, module_name)
-    record = replace(record, path=display_path.as_posix())
-    return record
+    return replace(record, path=display_path.as_posix())
 
 
 def scan_repo(repo_dir: pathlib.Path, project_config: ProjectConfig) -> list[FileRecord]:
@@ -275,6 +493,111 @@ def upsert_repo(conn: sqlite3.Connection, subsystem: str, repo: str, repo_dir: p
     )
     row = conn.execute("SELECT id FROM repos WHERE name = ?", (name,)).fetchone()
     return int(row["id"])
+
+
+def _run_git(repo_dir: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[str] | None:
+    # Only treat an explicitly configured repository as a Git unit. A nested
+    # directory inside a parent monorepo falls back to full scanning because its
+    # diff paths would otherwise include the monorepo prefix.
+    if not (repo_dir / ".git").exists():
+        return None
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def git_head_commit(repo_dir: pathlib.Path) -> str | None:
+    result = _run_git(repo_dir, ["rev-parse", "HEAD"])
+    commit = result.stdout.strip() if result is not None else ""
+    return commit or None
+
+
+def git_changed_files(
+    repo_dir: pathlib.Path,
+    old_commit: str,
+    new_commit: str,
+) -> dict[str, str] | None:
+    """Return Git path -> change status between two commits.
+
+    `diff-tree` emits NUL-separated records. Rename and copy records have an
+    extra source path, so parsing must consume two paths for R/C statuses.
+    """
+    result = _run_git(
+        repo_dir,
+        ["diff-tree", "-r", "--name-status", "--no-commit-id", "-z", old_commit, new_commit],
+    )
+    if result is None:
+        return None
+    parts = result.stdout.split("\0")
+    changed: dict[str, str] = {}
+    index = 0
+    while index < len(parts):
+        item = parts[index]
+        if not item:
+            index += 1
+            continue
+        status = item[:1]
+        if status in {"R", "C"} and index + 2 < len(parts):
+            changed[parts[index + 2]] = status
+            index += 3
+        else:
+            path = parts[index + 1] if index + 1 < len(parts) else ""
+            if path:
+                changed[path] = status
+            index += 2
+    return changed
+
+
+def _last_indexed_commit(conn: sqlite3.Connection, repo_id: int) -> str | None:
+    row = conn.execute(
+        "SELECT last_commit FROM index_state WHERE repo_id = ?", (repo_id,)
+    ).fetchone()
+    return row["last_commit"] if row is not None else None
+
+
+def _record_index_state(conn: sqlite3.Connection, repo_id: int, commit: str | None) -> None:
+    if not commit:
+        return
+    conn.execute(
+        """
+        INSERT INTO index_state(repo_id, last_commit, last_indexed_at) VALUES(?,?,?)
+        ON CONFLICT(repo_id) DO UPDATE SET
+          last_commit=excluded.last_commit,
+          last_indexed_at=excluded.last_indexed_at
+        """,
+        (repo_id, commit, utcnow()),
+    )
+
+
+def _insert_diagnostics(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    stable_path: str,
+    diagnostics: tuple[dict, ...],
+) -> int:
+    if not diagnostics:
+        return 0
+    conn.execute(
+        "DELETE FROM index_diagnostics WHERE repo_id = ? AND file_path = ?",
+        (repo_id, stable_path),
+    )
+    for item in diagnostics:
+        conn.execute(
+            """
+            INSERT INTO index_diagnostics(repo_id, file_path, level, code, message, created_at)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (repo_id, stable_path, item["level"], item["code"], item["message"], utcnow()),
+        )
+    return len(diagnostics)
 
 
 def _file_changed(
@@ -366,6 +689,10 @@ def mark_memory_drift(conn: sqlite3.Connection, file_ids: list[int]) -> int:
 
 
 def index_project(config: ProjectConfig) -> dict:
+    return index_project(config, full=False)
+
+
+def index_project(config: ProjectConfig, *, full: bool = False) -> dict:
     conn = connect(config.db_path, create=True)
     stats = {
         "repos": 0,
@@ -374,6 +701,9 @@ def index_project(config: ProjectConfig) -> dict:
         "files_unchanged": 0,
         "symbols": 0,
         "imports": 0,
+        "mode": "full",
+        "git_candidates": 0,
+        "diagnostics": 0,
         "memories_marked_stale": 0,
     }
     seen_repo_ids: set[int] = set()
@@ -386,7 +716,61 @@ def index_project(config: ProjectConfig) -> dict:
                 seen_repo_ids.add(repo_id)
                 stats["repos"] += 1
                 indexed_paths: set[str] = set()
-                for record in scan_repo(repo_dir, config):
+                head_commit = git_head_commit(repo_dir)
+                previous_commit = None if full else _last_indexed_commit(conn, repo_id)
+                changed_paths: dict[str, str] = {}
+                incremental = bool(head_commit and previous_commit)
+                if incremental and previous_commit != head_commit:
+                    diff_result = git_changed_files(repo_dir, previous_commit, head_commit)
+                    if diff_result is None:
+                        incremental = False
+                    else:
+                        changed_paths = diff_result
+                if incremental:
+                    stats["mode"] = "git-diff-tree"
+                    stats["git_candidates"] += len(changed_paths)
+
+                # Deletions are removed directly; they cannot be scanned as files.
+                for rel_path, status in sorted(changed_paths.items()):
+                    if status != "D":
+                        continue
+                    stable_path = f"{repo_name}/{rel_path}"
+                    old_file_row = conn.execute(
+                        "SELECT id FROM files WHERE repo_id = ? AND path = ?",
+                        (repo_id, stable_path),
+                    ).fetchone()
+                    if old_file_row is not None:
+                        stats["memories_marked_stale"] += mark_memory_drift(
+                            conn, [int(old_file_row["id"])]
+                        )
+                        conn.execute(
+                            "DELETE FROM files WHERE repo_id = ? AND path = ?",
+                            (repo_id, stable_path),
+                        )
+
+                candidate_records: list[FileRecord] = []
+                if changed_paths:
+                    supported = {
+                        rel_path
+                        for rel_path, status in changed_paths.items()
+                        if status != "D"
+                        and LANGUAGE_EXTENSIONS.get(pathlib.PurePath(rel_path).suffix.lower())
+                        and not is_excluded(pathlib.Path(rel_path), config)
+                    }
+                    for rel_path in sorted(supported):
+                        absolute_path = repo_dir / rel_path
+                        if not absolute_path.is_file():
+                            continue
+                        record = scan_file(absolute_path, pathlib.Path(rel_path))
+                        if record is not None:
+                            candidate_records.append(record)
+                if not incremental:
+                    candidate_records = scan_repo(repo_dir, config)
+
+                conn.execute(
+                    "DELETE FROM index_diagnostics WHERE repo_id = ?", (repo_id,)
+                )
+                for record in candidate_records:
                     rel_path = record.path
                     # Project-wide stable paths include the repo name. This makes
                     # scope boundaries and query output unambiguous across repos.
@@ -409,7 +793,12 @@ def index_project(config: ProjectConfig) -> dict:
                             conn, [int(old_file_row["id"])]
                         )
                     file_id = _insert_file_record(conn, repo_id, record)
+                    stats["diagnostics"] += _insert_diagnostics(
+                        conn, repo_id, stable_path, record.diagnostics
+                    )
                     stats["files_changed"] += 1
+
+                _record_index_state(conn, repo_id, head_commit)
 
                 # Remove files deleted from the working tree. This deliberately
                 # keeps unchanged rows untouched so incremental indexing stays cheap.

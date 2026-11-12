@@ -106,9 +106,26 @@ CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_references_target ON refs(target_name);
 CREATE INDEX IF NOT EXISTS idx_references_source ON refs(source_file_id);
+
+CREATE TABLE IF NOT EXISTS index_state (
+  repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+  last_commit TEXT NOT NULL,
+  last_indexed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS index_diagnostics (
+  id INTEGER PRIMARY KEY,
+  repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  level TEXT NOT NULL,
+  code TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_memory_evidence_file ON memory_evidence(file_id);
 CREATE INDEX IF NOT EXISTS idx_scope_token ON scope_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_diagnostics_repo ON index_diagnostics(repo_id, file_path);
 """
 
 

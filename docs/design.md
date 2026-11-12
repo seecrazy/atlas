@@ -59,7 +59,7 @@
       "repos": ["payment-core"]
     }
   ],
-  "languages": ["python", "typescript"],
+  "languages": ["python", "typescript", "javascript", "go", "java"],
   "exclude": ["node_modules", "dist", "target", ".venv"]
 }
 ```
@@ -71,7 +71,9 @@
 | `repos` | 注册仓库及其所属子系统 |
 | `files` | 文件路径、语言、内容 hash、mtime、文件级模块名 |
 | `symbols` | 符号名、限定名、类型、路径、行号范围、导出标记 |
-| `references` | 源文件对目标符号的引用边 |
+| `refs` | 源文件对目标符号的引用边 |
+| `index_state` | 仓库最后一次成功索引的 Git commit |
+| `index_diagnostics` | 文件级索引诊断 |
 | `memories` | 结构化记忆条目、证据、状态、置信度 |
 | `memory_evidence` | 记忆条目与文件证据的关联 |
 | `scope_tokens` | 短期 token、路径边界、状态、过期时间 |
@@ -82,6 +84,7 @@
 | 对象 | 状态 |
 | --- | --- |
 | 文件 | `valid` / `changed` |
+| 诊断 | `warning` / `error` |
 | 记忆 | `valid` / `stale` / `invalid` |
 | scope token | `active` / `used` / `expired` / `revoked` |
 
@@ -93,8 +96,23 @@
 2. 跳过 exclude 目录、隐藏目录、二进制文件和无扩展名文件。
 3. Python 文件使用 AST 抽取模块、类、函数、方法、导入。
 4. TypeScript/JavaScript 文件使用基础正则抽取类、函数、导出符号和 import。
-5. 内容 hash 不变时保留原记录，减少重复写入。
-6. 删除的文件同步移除对应符号和引用。
+5. Go/Java 文件使用基础正则抽取包、导入、类型、函数/方法和入口符号。
+6. 内容 hash 不变时保留原记录，减少重复写入。
+7. 删除的文件同步移除对应符号和引用。
+
+### 增量索引
+
+Phase 2 引入 Git-aware 增量模式：
+
+1. Git 仓库首次索引仍然全量扫描。
+2. 首次索引成功后，在 `index_state` 记录每个仓库的 `last_commit`。
+3. 后续索引读取 Git 变更集合，只把变更路径作为候选文件。
+4. 候选文件仍使用内容 hash 校验，避免索引器误读文件系统缓存。
+5. 删除文件会从文件、符号、引用和证据关联中同步清理。
+6. 非 Git 仓库或 Git 命令失败时降级为全量扫描，保证可用性。
+7. `full=True` CLI 参数可以强制全量重建候选集合。
+
+当前增量索引只覆盖提交间变化，不承诺处理所有未提交工作区状态。未提交变更可以直接使用 `atlas index --full` 重建。
 
 ### MCP
 
@@ -113,7 +131,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 
 1. 配置不存在或非法时，`init` / `index` / `serve` 立即失败并给出明确错误。
 2. 解析失败的文件记录为无符号，不阻断整体索引。
-3. 文件读取使用 UTF-8，无法解码时跳过并保留审计。
+3. 解析失败和无法解码的文件写入 `index_diagnostics`，并在 health 中返回计数。
 4. SQLite 使用 WAL，限制并发写冲突。
 5. MCP 查询缺少参数时返回协议级错误。
 6. scope token 不存在、过期、已撤销或范围不匹配时拒绝查询。
@@ -157,13 +175,21 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 
 - [x] pytest 覆盖索引、搜索、引用、scope 和 MCP 协议。
 
+### Phase 2 增量与语言
+
+- [x] Go 基础符号与 import 抽取。
+- [x] Java 基础符号与 import 抽取。
+- [x] Git-aware 提交间增量索引。
+- [x] 非 Git 仓库自动降级全量索引。
+- [x] 索引诊断写入数据库并在 health 中展示。
+
 ## 8. 后续演进
 
 1. 增加更多语言解析器：Go、Java、Rust。
-2. 引入 tree-sitter 或稳定语言服务作为 Phase 2 索引后端。
+2. 引入 tree-sitter 或稳定语言服务作为后续索引后端。
 3. 为热点文件增加按需语义摘要。
 4. 增加 Router / Worker 编排器原型。
-5. 增加 git diff-tree 增量索引守护进程。
+5. 增加 Git 事件守护进程与未提交变更监听。
 6. 将 `create_scope` 从通用 MCP 工具迁出，改为编排器专用端点。
 7. 增加冻结验证集，用于评估索引准确率和路由质量。
 
