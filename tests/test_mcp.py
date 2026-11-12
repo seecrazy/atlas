@@ -26,6 +26,9 @@ def test_mcp_initialize_and_tools_list(project_root):
             "atlas_search",
             "atlas_references",
             "atlas_impact",
+            "atlas_system_context",
+            "atlas_module_context",
+            "atlas_developer_context",
             "atlas_create_scope",
             "atlas_scoped_search",
             "atlas_route",
@@ -47,6 +50,15 @@ def test_mcp_search_and_scope(project_root):
         )
         payload = json.loads(response["result"]["content"][0]["text"])
         assert payload[0]["file"] == "demo/retry/handler.py"
+
+        system_response = call(
+            server,
+            "tools/call",
+            {"name": "atlas_system_context", "arguments": {}},
+        )
+        system_payload = json.loads(system_response["result"]["content"][0]["text"])
+        assert system_payload["layer"] == "system"
+        assert system_payload["repos"][0]["name"] == "demo"
 
         created = call(
             server,

@@ -56,6 +56,16 @@ atlas serve /path/to/project
 
 当前 Router 不执行代码修改，也不直接读取函数体。
 
+## 上下文包
+
+ATLAS 提供三层结构化上下文包，帮助不同粒度的 Agent 只接收自己职责内的信息：
+
+1. `atlas_system_context`：仓库、子系统、跨仓引用边和统计。
+2. `atlas_module_context`：目标文件的符号、import、入向引用和相关文件。
+3. `atlas_developer_context`：目标文件/符号的窄化上下文和 scope 候选。
+
+这些工具不返回完整源码。开发 Agent 访问完整实现仍应通过外部文件工具，并使用 scope token 限制边界。
+
 ### Codex CLI 接入
 
 ```bash
@@ -81,6 +91,9 @@ args = ["--project-root", "/absolute/path/to/project"]
 | `atlas_impact` | 评估修改某符号时受影响的下游位置 |
 | `atlas_file_context` | 返回文件的符号结构摘要，不返回完整代码 |
 | `atlas_route` | 对问题做确定性路由分类 |
+| `atlas_system_context` | 构建子系统/仓库与跨仓引用包 |
+| `atlas_module_context` | 构建文件符号边界和依赖包 |
+| `atlas_developer_context` | 构建目标符号的窄化开发上下文 |
 | `atlas_memories` | 查询记忆及证据状态 |
 | `atlas_review_memory` | 提交记忆复核决策 |
 | `atlas_create_scope` | 创建短期受限访问 token |

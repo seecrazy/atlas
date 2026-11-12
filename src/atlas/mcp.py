@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import ProjectConfig
 from .db import connect
+from .context import developer_context, module_context, system_context
 from .store import (
     ScopeError,
     create_scope,
@@ -148,6 +149,46 @@ TOOLS = [
         },
     },
     {
+        "name": "atlas_system_context",
+        "description": "Build a system-layer context packet with repos and cross-repo references.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subsystem": {"type": "string"},
+                "repo": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_module_context",
+        "description": "Build a module-layer context packet for one indexed file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": ["file_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_developer_context",
+        "description": "Build a narrow developer context packet; it does not contain source text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "minLength": 1},
+                "symbol": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": ["file_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "atlas_create_scope",
         "description": "Create a short-lived scope token. Intended for trusted orchestration.",
         "inputSchema": {
@@ -224,6 +265,22 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
         )
     if name == "atlas_file_context":
         return file_context(conn, args["file_path"], limit=args.get("limit"))
+    if name == "atlas_system_context":
+        return system_context(
+            conn,
+            subsystem=args.get("subsystem"),
+            repo=args.get("repo"),
+            limit=args.get("limit"),
+        )
+    if name == "atlas_module_context":
+        return module_context(conn, args["file_path"], limit=args.get("limit"))
+    if name == "atlas_developer_context":
+        return developer_context(
+            conn,
+            args["file_path"],
+            symbol=args.get("symbol"),
+            limit=args.get("limit"),
+        )
     if name == "atlas_create_scope":
         return create_scope(
             conn,

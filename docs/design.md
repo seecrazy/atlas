@@ -158,6 +158,25 @@ Router 的置信度只表示「分类规则和索引信号是否一致」，不�
 3. 调用方可以设置 `min_confidence=0.65` 排除噪声边。
 4. 返回值同时给出 `filtered_count` 和 `references_by_resolution`，避免静默丢数据。
 
+### 上下文包
+
+Phase 4 将上下文包构建做成固定边界的服务端能力：
+
+| 角色 | 工具 | 包内容 |
+| --- | --- | --- |
+| system | `atlas_system_context` | 子系统/仓库清单、文件与符号统计、跨仓引用边、置信度、警告 |
+| module | `atlas_module_context` | 文件模块名、符号清单、出向 import、入向引用、相关文件 |
+| developer | `atlas_developer_context` | 目标文件与目标符号的窄化上下文、入向影响、scope 候选；不含函数体 |
+
+构建规则：
+
+1. 所有上下文来自 SQLite 结构索引，不返回完整代码。
+2. system 包默认聚合跨仓引用边，用于架构师判断影响传播。
+3. module 包展示文件的符号边界和入向依赖。
+4. developer 包只针对一个文件；指定 symbol 时进一步收窄到该符号。
+5. developer 包返回 scope 候选，但不自动创建 scope token。
+6. 任一层查询的文件/仓库不存在时返回显式错误，不返回空假成功。
+
 ### MCP
 
 Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`tools/call`。工具返回结构化摘要，限制输出条数，避免一次性返回大段代码。
@@ -191,6 +210,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 8. `min_confidence` 被限制在 0.0 到 1.0。
 9. 默认最多返回 50 条结果，可由调用参数调整，但上限为 200。
 10. 索引不尝试读取完整文件内容进入模型上下文。
+11. developer 上下文包只提供结构和引用边界；访问完整源码仍必须通过外部工具和 scope token。
 
 ## 6. 安全与权限
 
@@ -249,6 +269,9 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 - [x] `atlas_impact` 支持 `min_confidence`。
 - [x] `atlas_memories` 返回证据引用。
 - [x] `atlas_review_memory` 保存复核决策。
+- [x] `atlas_system_context` 构建系统层包。
+- [x] `atlas_module_context` 构建模块层包。
+- [x] `atlas_developer_context` 构建开发层包。
 
 ## 8. 后续演进
 

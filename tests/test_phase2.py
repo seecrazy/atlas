@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 
 from atlas.config import load_config, write_default_config
+from atlas.context import developer_context, module_context, system_context
 from atlas.db import SCHEMA_VERSION, connect, utcnow
 from atlas.indexer import index_project
 from atlas.router import route_request
@@ -143,6 +144,12 @@ def test_reference_resolution_and_cross_repo(tmp_path: pathlib.Path) -> None:
         assert refs[0]["target_repo"] == "client"
         assert refs[0]["cross_repo"] is True
         assert refs[0]["confidence"] > 0.5
+
+        cross_context = system_context(conn)
+        assert cross_context["cross_repo_edges"]
+        assert cross_context["cross_repo_edges"][0]["source_repo"] == "api"
+        assert cross_context["cross_repo_edges"][0]["target_repo"] == "client"
+        assert cross_context["cross_repo_edges"][0]["reference_count"] == 1
     finally:
         conn.close()
 
@@ -161,6 +168,37 @@ def test_impact_confidence_filter(project_root: pathlib.Path) -> None:
         assert strict["filtered_count"] == 1
         assert strict["references_by_resolution"] == {"unique_name": 1}
         assert references(conn, "RetryClient", min_confidence=0.95) == []
+    finally:
+        conn.close()
+
+
+def test_system_module_and_developer_context(project_root: pathlib.Path) -> None:
+    config = load_config(project_root)
+    conn = connect(config.db_path)
+    try:
+        system = system_context(conn)
+        assert system["layer"] == "system"
+        assert system["repos"][0]["name"] == "demo"
+        assert system["repos"][0]["file_count"] == 3
+        assert system["cross_repo_edges"] == []
+        assert "no resolved cross-repo edges" in system["warnings"][0]
+
+        module = module_context(conn, "demo/client/RetryClient.ts")
+        assert module["layer"] == "module"
+        assert {item["name"] for item in module["symbols"]} >= {"RetryClient"}
+        assert module["inbound_references"][0]["source_file"] == "demo/client/Gateway.ts"
+        assert "demo/client/Gateway.ts" in module["related_files"]
+
+        developer = developer_context(
+            conn,
+            "demo/client/RetryClient.ts",
+            symbol="RetryClient",
+        )
+        assert developer["layer"] == "developer"
+        assert developer["target_symbols"][0]["name"] == "RetryClient"
+        assert developer["scope_candidates"] == ["demo/client"]
+        assert developer["contains_source_text"] is False
+        assert "demo/client/Gateway.ts" in developer["related_files"]
     finally:
         conn.close()
 
