@@ -1,0 +1,370 @@
+"""Query and scope operations over the ATLAS SQLite database."""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import secrets
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+from .config import ProjectConfig
+from .db import audit, utcnow
+
+
+DEFAULT_LIMIT = 50
+MAX_LIMIT = 200
+DEFAULT_SCOPE_TTL_SECONDS = 15 * 60
+
+
+class ScopeError(ValueError):
+    """Raised when a scope token is missing, invalid, expired, or out of range."""
+
+
+def _limit(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_LIMIT
+    return max(1, min(MAX_LIMIT, int(value)))
+
+
+def _like(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def health(conn: sqlite3.Connection) -> dict:
+    def scalar(sql: str) -> int:
+        row = conn.execute(sql).fetchone()
+        return int(row[0] or 0)
+
+    memory_rows = conn.execute(
+        "SELECT status, COUNT(*) AS count FROM memories GROUP BY status"
+    ).fetchall()
+    languages = {
+        row["language"]: int(row["count"])
+        for row in conn.execute("SELECT language, COUNT(*) AS count FROM files GROUP BY language")
+    }
+    repos = conn.execute("SELECT name, subsystem, path FROM repos ORDER BY name").fetchall()
+    return {
+        "repos": [
+            {"name": row["name"], "subsystem": row["subsystem"], "path": row["path"]}
+            for row in repos
+        ],
+        "repo_count": len(repos),
+        "file_count": scalar("SELECT COUNT(*) FROM files"),
+        "symbol_count": scalar("SELECT COUNT(*) FROM symbols"),
+        "reference_count": scalar("SELECT COUNT(*) FROM refs"),
+        "memory_count": scalar("SELECT COUNT(*) FROM memories"),
+        "memory_by_status": {row["status"]: int(row["count"]) for row in memory_rows},
+        "indexed_languages": languages,
+    }
+
+
+def search(conn: sqlite3.Connection, query: str, limit: int | None = None) -> list[dict]:
+    if not query.strip():
+        return []
+    pattern = _like(query.strip())
+    rows = conn.execute(
+        """
+        SELECT
+          s.name, s.qualified_name, s.kind, s.start_line, s.end_line, s.exported,
+          r.name AS repo, r.subsystem, f.path, f.language
+        FROM symbols s
+        JOIN files f ON f.id = s.file_id
+        JOIN repos r ON r.id = s.repo_id
+        WHERE s.name LIKE ? ESCAPE '\\'
+           OR s.qualified_name LIKE ? ESCAPE '\\'
+           OR f.path LIKE ? ESCAPE '\\'
+        ORDER BY s.exported DESC, s.name, f.path, s.start_line
+        LIMIT ?
+        """,
+        (pattern, pattern, pattern, _limit(limit)),
+    ).fetchall()
+    return [
+        {
+            "name": row["name"],
+            "qualified_name": row["qualified_name"],
+            "kind": row["kind"],
+            "repo": row["repo"],
+            "subsystem": row["subsystem"],
+            "file": row["path"],
+            "line": row["start_line"],
+            "end_line": row["end_line"],
+            "language": row["language"],
+            "exported": bool(row["exported"]),
+        }
+        for row in rows
+    ]
+
+
+def symbols(
+    conn: sqlite3.Connection,
+    *,
+    query: str | None = None,
+    file_path: str | None = None,
+    repo: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    conditions = []
+    params = []
+    if query:
+        conditions.append("(s.name LIKE ? ESCAPE '\\' OR s.qualified_name LIKE ? ESCAPE '\\')")
+        pattern = _like(query)
+        params.extend([pattern, pattern])
+    if file_path:
+        conditions.append("f.path LIKE ? ESCAPE '\\'")
+        params.append(_like(file_path))
+    if repo:
+        conditions.append("r.name = ?")
+        params.append(repo)
+    sql = """
+        SELECT
+          s.name, s.qualified_name, s.kind, s.start_line, s.end_line, s.exported,
+          r.name AS repo, r.subsystem, f.path, f.language
+        FROM symbols s
+        JOIN files f ON f.id = s.file_id
+        JOIN repos r ON r.id = s.repo_id
+    """
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY f.path, s.start_line LIMIT ?"
+    params.append(_limit(limit))
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        {
+            "name": row["name"],
+            "qualified_name": row["qualified_name"],
+            "kind": row["kind"],
+            "repo": row["repo"],
+            "subsystem": row["subsystem"],
+            "file": row["path"],
+            "line": row["start_line"],
+            "end_line": row["end_line"],
+            "language": row["language"],
+            "exported": bool(row["exported"]),
+        }
+        for row in rows
+    ]
+
+
+def references(conn: sqlite3.Connection, symbol_name: str, limit: int | None = None) -> list[dict]:
+    if not symbol_name.strip():
+        return []
+    name = symbol_name.strip()
+    rows = conn.execute(
+        """
+        SELECT
+          ref.target_name, ref.line, ref.kind,
+          r.name AS repo, r.subsystem, f.path
+        FROM refs ref
+        JOIN files f ON f.id = ref.source_file_id
+        JOIN repos r ON r.id = ref.source_repo_id
+        WHERE ref.target_name = ?
+           OR ref.target_name LIKE '%.' || ?
+           OR ref.target_name LIKE '%/' || ?
+        ORDER BY f.path, ref.line
+        LIMIT ?
+        """,
+        (name, name, name, _limit(limit)),
+    ).fetchall()
+    return [
+        {
+            "target": row["target_name"],
+            "source_repo": row["repo"],
+            "subsystem": row["subsystem"],
+            "source_file": row["path"],
+            "line": row["line"],
+            "kind": row["kind"],
+        }
+        for row in rows
+    ]
+
+
+def impact(conn: sqlite3.Connection, symbol_name: str, limit: int | None = None) -> dict:
+    refs = references(conn, symbol_name, limit=limit)
+    by_repo: dict[str, list[dict]] = {}
+    for ref in refs:
+        by_repo.setdefault(ref["source_repo"], []).append(ref)
+    return {
+        "symbol": symbol_name,
+        "reference_count": len(refs),
+        "affected_repos": sorted(by_repo),
+        "references": refs,
+    }
+
+
+def file_context(conn: sqlite3.Connection, file_path: str, limit: int | None = None) -> dict:
+    file_row = conn.execute(
+        """
+        SELECT f.id, f.path, f.language, f.module_name, f.status,
+               r.name AS repo, r.subsystem
+        FROM files f
+        JOIN repos r ON r.id = f.repo_id
+        WHERE f.path = ?
+        """,
+        (file_path,),
+    ).fetchone()
+    if file_row is None:
+        raise FileNotFoundError(f"indexed file not found: {file_path}")
+    symbol_rows = conn.execute(
+        """
+        SELECT name, qualified_name, kind, start_line, end_line, exported
+        FROM symbols WHERE file_id = ?
+        ORDER BY start_line LIMIT ?
+        """,
+        (file_row["id"], _limit(limit)),
+    ).fetchall()
+    import_rows = conn.execute(
+        "SELECT target_name, line, kind FROM refs WHERE source_file_id = ? ORDER BY line LIMIT ?",
+        (file_row["id"], _limit(limit)),
+    ).fetchall()
+    return {
+        "file": file_row["path"],
+        "repo": file_row["repo"],
+        "subsystem": row_subsystem(file_row),
+        "language": file_row["language"],
+        "module": file_row["module_name"],
+        "status": file_row["status"],
+        "symbols": [
+            {
+                "name": row["name"],
+                "qualified_name": row["qualified_name"],
+                "kind": row["kind"],
+                "line": row["start_line"],
+                "end_line": row["end_line"],
+                "exported": bool(row["exported"]),
+            }
+            for row in symbol_rows
+        ],
+        "imports": [
+            {"target": row["target_name"], "line": row["line"], "kind": row["kind"]}
+            for row in import_rows
+        ],
+    }
+
+
+def row_subsystem(row: sqlite3.Row) -> str:
+    return row["subsystem"]
+
+
+def _validate_scope_paths(
+    conn: sqlite3.Connection,
+    config: ProjectConfig,
+    paths: list[str],
+) -> list[str]:
+    normalized: list[str] = []
+    for value in paths:
+        if not isinstance(value, str) or not value.strip():
+            raise ScopeError("scope paths must be non-empty strings")
+        clean = pathlib.PurePosixPath(value.strip().strip("/"))
+        if not clean.parts or clean.is_absolute() or ".." in clean.parts:
+            raise ScopeError(f"invalid scope path: {value}")
+        normalized.append(clean.as_posix())
+    if not normalized:
+        raise ScopeError("at least one scope path is required")
+    # Phase 1 scope paths are project-relative stable paths such as
+    # payment-core/src/retry. This prevents creating a token rooted outside the
+    # configured repository graph.
+    repo_names = {row["name"] for row in conn.execute("SELECT name FROM repos")}
+    for path in normalized:
+        if path.split("/", 1)[0] not in repo_names:
+            raise ScopeError(f"scope path is not rooted at a registered repo: {path}")
+    return normalized
+
+
+def create_scope(
+    conn: sqlite3.Connection,
+    config: ProjectConfig,
+    paths: list[str],
+    *,
+    ttl_seconds: int = DEFAULT_SCOPE_TTL_SECONDS,
+    created_by: str = "atlas-cli",
+) -> dict:
+    if ttl_seconds <= 0 or ttl_seconds > 24 * 60 * 60:
+        raise ScopeError("scope ttl must be between 1 second and 24 hours")
+    validated = _validate_scope_paths(conn, config, paths)
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=ttl_seconds)
+    conn.execute(
+        "INSERT INTO scope_tokens(token, paths_json, created_at, expires_at, created_by) VALUES(?,?,?,?,?)",
+        (token, json.dumps(validated, ensure_ascii=False), utcnow(), expires.isoformat(), created_by),
+    )
+    audit(
+        conn,
+        "scope.created",
+        {"paths": validated, "expires_at": expires.isoformat(), "created_by": created_by},
+        actor=created_by,
+    )
+    conn.commit()
+    return {"token": token, "paths": validated, "expires_at": expires.isoformat()}
+
+
+def _active_scope(conn: sqlite3.Connection, token: str) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM scope_tokens WHERE token = ?", (token,)).fetchone()
+    if row is None:
+        raise ScopeError("invalid scope token")
+    if row["status"] != "active":
+        raise ScopeError(f"scope token is not active: {row['status']}")
+    try:
+        expires_at = datetime.fromisoformat(row["expires_at"])
+    except ValueError as exc:
+        raise ScopeError("scope token has an invalid expiration") from exc
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        conn.execute(
+            "UPDATE scope_tokens SET status = 'expired' WHERE id = ? AND status = 'active'",
+            (row["id"],),
+        )
+        conn.commit()
+        raise ScopeError("scope token expired")
+    return row
+
+
+def _within_scope(path: str, scope_paths: list[str]) -> bool:
+    parts = pathlib.PurePosixPath(path).parts
+    return any(
+        path == scope or path.startswith(scope + "/")
+        for scope in scope_paths
+    )
+
+
+def scoped_search(
+    conn: sqlite3.Connection,
+    token: str,
+    query: str,
+    limit: int | None = None,
+    *,
+    actor: str = "scoped-agent",
+) -> list[dict]:
+    scope = _active_scope(conn, token)
+    scope_paths = json.loads(scope["paths_json"])
+    results = search(conn, query, limit=limit)
+    scoped = [item for item in results if _within_scope(item["file"], scope_paths)]
+    now = utcnow()
+    conn.execute(
+        "UPDATE scope_tokens SET used_at = COALESCE(used_at, ?) WHERE id = ?",
+        (now, scope["id"]),
+    )
+    audit(
+        conn,
+        "scope.used",
+        {"query": query, "result_count": len(scoped), "paths": scope_paths},
+        actor=actor,
+    )
+    conn.commit()
+    return scoped
+
+
+def revoke_scope(conn: sqlite3.Connection, token: str) -> bool:
+    cursor = conn.execute(
+        "UPDATE scope_tokens SET status = 'revoked' WHERE token = ? AND status = 'active'",
+        (token,),
+    )
+    changed = bool(cursor.rowcount)
+    if changed:
+        audit(conn, "scope.revoked", {"token_hash": secrets.token_hex(8)})
+        conn.commit()
+    return changed
+
