@@ -47,6 +47,9 @@ def health(conn: sqlite3.Connection) -> dict:
         GROUP BY level
         """
     ).fetchall()
+    reference_rows = conn.execute(
+        "SELECT resolution_status, COUNT(*) AS count FROM refs GROUP BY resolution_status"
+    ).fetchall()
     languages = {
         row["language"]: int(row["count"])
         for row in conn.execute("SELECT language, COUNT(*) AS count FROM files GROUP BY language")
@@ -61,6 +64,9 @@ def health(conn: sqlite3.Connection) -> dict:
         "file_count": scalar("SELECT COUNT(*) FROM files"),
         "symbol_count": scalar("SELECT COUNT(*) FROM symbols"),
         "reference_count": scalar("SELECT COUNT(*) FROM refs"),
+        "references_by_resolution": {
+            row["resolution_status"]: int(row["count"]) for row in reference_rows
+        },
         "memory_count": scalar("SELECT COUNT(*) FROM memories"),
         "memory_by_status": {row["status"]: int(row["count"]) for row in memory_rows},
         "indexed_languages": languages,
@@ -163,24 +169,43 @@ def references(conn: sqlite3.Connection, symbol_name: str, limit: int | None = N
     rows = conn.execute(
         """
         SELECT
-          ref.target_name, ref.line, ref.kind,
-          r.name AS repo, r.subsystem, f.path
+          ref.target_name, ref.target_symbol, ref.resolution_status,
+          ref.resolution_method, ref.confidence, ref.line, ref.kind,
+          r.name AS repo, r.subsystem, f.path,
+          r.id AS source_repo_id,
+          sr.name AS target_repo,
+          sr.id AS target_repo_id,
+          sr.subsystem AS target_subsystem
         FROM refs ref
         JOIN files f ON f.id = ref.source_file_id
         JOIN repos r ON r.id = ref.source_repo_id
+        LEFT JOIN symbols sym ON sym.id = ref.target_symbol_id
+        LEFT JOIN repos sr ON sr.id = sym.repo_id
         WHERE ref.target_name = ?
            OR ref.target_name LIKE '%.' || ?
            OR ref.target_name LIKE '%/' || ?
+           OR (ref.target_symbol_id IS NOT NULL AND sym.name = ?)
+           OR (ref.target_symbol_id IS NOT NULL AND sym.qualified_name = ?)
         ORDER BY f.path, ref.line
         LIMIT ?
         """,
-        (name, name, name, _limit(limit)),
+        (name, name, name, name, name, _limit(limit)),
     ).fetchall()
     return [
         {
             "target": row["target_name"],
+            "resolved_symbol": row["target_symbol"],
+            "resolution_status": row["resolution_status"],
+            "resolution_method": row["resolution_method"],
+            "confidence": row["confidence"],
             "source_repo": row["repo"],
             "subsystem": row["subsystem"],
+            "target_repo": row["target_repo"],
+            "target_subsystem": row["target_subsystem"],
+            "cross_repo": (
+                row["target_repo"] is not None
+                and row["source_repo_id"] != row["target_repo_id"]
+            ),
             "source_file": row["path"],
             "line": row["line"],
             "kind": row["kind"],
@@ -224,7 +249,11 @@ def file_context(conn: sqlite3.Connection, file_path: str, limit: int | None = N
         (file_row["id"], _limit(limit)),
     ).fetchall()
     import_rows = conn.execute(
-        "SELECT target_name, line, kind FROM refs WHERE source_file_id = ? ORDER BY line LIMIT ?",
+        """
+        SELECT target_name, target_symbol, resolution_status,
+               resolution_method, confidence, line, kind
+        FROM refs WHERE source_file_id = ? ORDER BY line LIMIT ?
+        """,
         (file_row["id"], _limit(limit)),
     ).fetchall()
     return {
@@ -246,7 +275,14 @@ def file_context(conn: sqlite3.Connection, file_path: str, limit: int | None = N
             for row in symbol_rows
         ],
         "imports": [
-            {"target": row["target_name"], "line": row["line"], "kind": row["kind"]}
+            {
+                "target": row["target_name"],
+                "resolved_symbol": row["target_symbol"],
+                "resolution_status": row["resolution_status"],
+                "confidence": row["confidence"],
+                "line": row["line"],
+                "kind": row["kind"],
+            }
             for row in import_rows
         ],
     }

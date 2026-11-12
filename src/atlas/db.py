@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS refs (
   source_repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
   target_name TEXT NOT NULL,
   target_symbol TEXT,
+  target_symbol_id INTEGER,
+  resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+  resolution_method TEXT,
+  confidence REAL NOT NULL DEFAULT 0.0,
   line INTEGER NOT NULL,
   kind TEXT NOT NULL DEFAULT 'import'
 );
@@ -106,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_references_target ON refs(target_name);
 CREATE INDEX IF NOT EXISTS idx_references_source ON refs(source_file_id);
+CREATE INDEX IF NOT EXISTS idx_references_target_symbol ON refs(target_symbol_id);
 
 CREATE TABLE IF NOT EXISTS index_state (
   repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
@@ -133,6 +138,58 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    if "refs" not in {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='refs'"
+        )
+    }:
+        return
+    columns = _table_columns(conn, "refs")
+    statements = []
+    if "target_symbol_id" not in columns:
+        statements.append("ALTER TABLE refs ADD COLUMN target_symbol_id INTEGER")
+    if "resolution_status" not in columns:
+        statements.append(
+            "ALTER TABLE refs ADD COLUMN resolution_status TEXT NOT NULL DEFAULT 'unresolved'"
+        )
+    if "resolution_method" not in columns:
+        statements.append("ALTER TABLE refs ADD COLUMN resolution_method TEXT")
+    if "confidence" not in columns:
+        statements.append("ALTER TABLE refs ADD COLUMN confidence REAL NOT NULL DEFAULT 0.0")
+    for statement in statements:
+        conn.execute(statement)
+    conn.execute(
+        """
+        DELETE FROM refs
+         WHERE id NOT IN (
+           SELECT MIN(id) FROM refs
+           GROUP BY source_file_id, target_name, line, kind
+         )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_refs_unique_edge "
+        "ON refs(source_file_id, target_name, line, kind)"
+    )
+    if "meta" in {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
+        )
+    }:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+
+
 def connect(db_path: str | pathlib.Path, *, create: bool = False) -> sqlite3.Connection:
     path = pathlib.Path(db_path)
     if not create and not path.is_file():
@@ -145,11 +202,8 @@ def connect(db_path: str | pathlib.Path, *, create: bool = False) -> sqlite3.Con
     conn.execute("PRAGMA synchronous = NORMAL")
     if create:
         conn.executescript(SCHEMA)
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(SCHEMA_VERSION),),
-        )
+    _migrate(conn)
+    conn.commit()
     return conn
 
 

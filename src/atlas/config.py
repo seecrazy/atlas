@@ -39,7 +39,7 @@ def default_config(project_root: pathlib.Path) -> dict:
         "subsystems": [
             {"name": "default", "repos": ["."]}
         ],
-        "languages": ["python", "typescript", "javascript", "go", "java"],
+        "languages": ["python", "typescript", "javascript", "go", "java", "rust"],
         "exclude": [
             "node_modules",
             "dist",

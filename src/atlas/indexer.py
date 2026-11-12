@@ -25,6 +25,7 @@ LANGUAGE_EXTENSIONS = {
     ".cjs": "javascript",
     ".go": "go",
     ".java": "java",
+    ".rs": "rust",
 }
 
 EXCLUDED_DIRS = {
@@ -452,9 +453,102 @@ def extract_java(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byte
     ), content
 
 
+RUST_USE_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]+\))?\s+)?use\s+([A-Za-z_][\w:{}:, \s]*?)\s*;",
+    re.MULTILINE,
+)
+RUST_TYPE_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum|trait|type)\s+([A-Za-z_][\w]*)",
+    re.MULTILINE,
+)
+RUST_FUNCTION_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][\w]*)",
+    re.MULTILINE,
+)
+RUST_IMPL_RE = re.compile(
+    r"^\s*impl(?:<[^>]*>)?\s+(?:[\w:]+\s+for\s+)?([A-Za-z_][\w:]*)",
+    re.MULTILINE,
+)
+
+
+def extract_rust(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
+    content = path.read_bytes()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return FileRecord(
+            path=path.as_posix(),
+            language="rust",
+            module_name=module_name,
+            content_hash=content_digest(content),
+            mtime=path.stat().st_mtime,
+            symbols=(),
+            imports=(),
+            diagnostics=_diagnostic("error", "decode_error", "file is not valid UTF-8"),
+        ), content
+
+    imports = []
+    for match in RUST_USE_RE.finditer(text):
+        target = re.sub(r"\s+", "", match.group(1))
+        imports.append(
+            {
+                "target": target,
+                "line": text.count("\n", 0, match.start()) + 1,
+                "kind": "use",
+            }
+        )
+
+    impl_markers = [
+        (text.count("\n", 0, match.start()) + 1, match.group(1).split("::")[-1])
+        for match in RUST_IMPL_RE.finditer(text)
+    ]
+    symbols: list[Symbol] = []
+    for match in RUST_TYPE_RE.finditer(text):
+        name = match.group(1)
+        symbols.append(
+            Symbol(
+                name=name,
+                qualified_name=f"{module_name}.{name}",
+                kind="type",
+                start_line=text.count("\n", 0, match.start()) + 1,
+                end_line=text.count("\n", 0, match.start()) + 1,
+                exported=match.group(0).lstrip().startswith("pub"),
+            )
+        )
+    for match in RUST_FUNCTION_RE.finditer(text):
+        name = match.group(1)
+        line = text.count("\n", 0, match.start()) + 1
+        parent = None
+        for impl_line, impl_type in reversed(impl_markers):
+            if impl_line <= line:
+                parent = f"{module_name}.{impl_type}"
+                break
+        symbols.append(
+            Symbol(
+                name=name,
+                qualified_name=f"{parent}.{name}" if parent else f"{module_name}.{name}",
+                kind="method" if parent else "function",
+                start_line=line,
+                end_line=line,
+                exported=match.group(0).lstrip().startswith("pub"),
+                parent_qualified=parent,
+            )
+        )
+
+    return FileRecord(
+        path=path.as_posix(),
+        language="rust",
+        module_name=module_name,
+        content_hash=content_digest(content),
+        mtime=path.stat().st_mtime,
+        symbols=tuple(symbols),
+        imports=tuple(imports),
+    ), content
+
+
 def scan_file(path: pathlib.Path, display_path: pathlib.Path | None = None) -> FileRecord | None:
     language = LANGUAGE_EXTENSIONS.get(path.suffix.lower())
-    if language not in {"python", "typescript", "javascript", "go", "java"}:
+    if language not in {"python", "typescript", "javascript", "go", "java", "rust"}:
         return None
     display_path = display_path or path
     module_name = module_name_from_path(display_path)
@@ -466,6 +560,9 @@ def scan_file(path: pathlib.Path, display_path: pathlib.Path | None = None) -> F
         return replace(record, path=display_path.as_posix())
     if language == "java":
         record, _ = extract_java(path, module_name)
+        return replace(record, path=display_path.as_posix())
+    if language == "rust":
+        record, _ = extract_rust(path, module_name)
         return replace(record, path=display_path.as_posix())
     record, _ = extract_ts_js(path, module_name)
     return replace(record, path=display_path.as_posix())
@@ -688,6 +785,59 @@ def mark_memory_drift(conn: sqlite3.Connection, file_ids: list[int]) -> int:
     return int(cursor.rowcount or 0)
 
 
+def _resolve_references(conn: sqlite3.Connection) -> dict:
+    """Bind import/use edges to indexed symbols when a mechanical match exists."""
+    rows = conn.execute(
+        "SELECT id, target_name, source_repo_id FROM refs ORDER BY id"
+    ).fetchall()
+    counts = {"resolved": 0, "unique_name": 0, "ambiguous": 0, "unresolved": 0}
+    for row in rows:
+        target = row["target_name"]
+        symbol_rows = conn.execute(
+            "SELECT id, qualified_name, repo_id FROM symbols WHERE qualified_name = ?",
+            (target,),
+        ).fetchall()
+        if len(symbol_rows) == 1:
+            status = "resolved"
+            method = "qualified_name"
+            confidence = 0.95
+        else:
+            if "/" in target:
+                candidate = pathlib.PurePosixPath(target).name
+            else:
+                candidate = target.rsplit(".", 1)[-1]
+            symbol_rows = conn.execute(
+                "SELECT id, qualified_name, repo_id FROM symbols WHERE name = ? ORDER BY id",
+                (candidate,),
+            ).fetchall()
+            if len(symbol_rows) == 1:
+                status = "unique_name"
+                method = "unique_name"
+                confidence = 0.65
+            elif len(symbol_rows) > 1:
+                status = "ambiguous"
+                method = "same_name_candidates"
+                confidence = 0.45
+            else:
+                status = "unresolved"
+                method = None
+                confidence = 0.0
+
+        symbol_id = symbol_rows[0]["id"] if len(symbol_rows) == 1 else None
+        symbol_name = symbol_rows[0]["qualified_name"] if len(symbol_rows) == 1 else None
+        conn.execute(
+            """
+            UPDATE refs
+               SET target_symbol_id = ?, target_symbol = ?, resolution_status = ?,
+                   resolution_method = ?, confidence = ?
+             WHERE id = ?
+            """,
+            (symbol_id, symbol_name, status, method, confidence, row["id"]),
+        )
+        counts[status] += 1
+    return counts
+
+
 def index_project(config: ProjectConfig) -> dict:
     return index_project(config, full=False)
 
@@ -819,7 +969,10 @@ def index_project(config: ProjectConfig, *, full: bool = False) -> dict:
             if int(repo_row["id"]) in seen_repo_ids:
                 continue
             conn.execute("DELETE FROM repos WHERE id = ?", (repo_row["id"],))
+        reference_resolution = _resolve_references(conn)
+        stats["reference_resolution"] = reference_resolution
         audit(conn, "index.completed", stats)
+        audit(conn, "references.resolved", reference_resolution)
         conn.commit()
     finally:
         conn.close()

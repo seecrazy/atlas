@@ -1,11 +1,12 @@
 import json
 import pathlib
+import sqlite3
 import subprocess
 
 from atlas.config import load_config, write_default_config
-from atlas.db import connect
+from atlas.db import SCHEMA_VERSION, connect
 from atlas.indexer import index_project
-from atlas.store import health, search
+from atlas.store import health, references, search
 
 
 def test_go_and_java_basic_index(tmp_path: pathlib.Path) -> None:
@@ -63,6 +64,124 @@ public class UserService {
         report = health(conn)
         assert report["indexed_languages"]["go"] == 1
         assert report["indexed_languages"]["java"] == 1
+    finally:
+        conn.close()
+
+
+def test_rust_basic_index(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "rust-project"
+    root.mkdir()
+    (root / "service.rs").write_text(
+        """
+use std::collections::HashMap;
+
+pub struct Server {
+    pub name: String,
+}
+
+impl Server {
+    pub fn ping(&self) -> bool {
+        true
+    }
+}
+
+fn start_server() {}
+""",
+        encoding="utf-8",
+    )
+    write_default_config(root, overwrite=True)
+    config = load_config(root)
+    stats = index_project(config, full=True)
+    assert stats["files_changed"] == 1
+    conn = connect(config.db_path)
+    try:
+        names = {item["name"] for item in search(conn, "Server")}
+        functions = {item["name"] for item in search(conn, "ping")}
+        assert "Server" in names
+        assert "ping" in functions
+        assert health(conn)["indexed_languages"]["rust"] == 1
+    finally:
+        conn.close()
+
+
+def test_reference_resolution_and_cross_repo(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "cross-repo"
+    root.mkdir()
+    (root / "api").mkdir()
+    (root / "client").mkdir()
+    (root / "api" / "app.py").write_text(
+        "from client.models import User\n\n\ndef use_user():\n    return User\n",
+        encoding="utf-8",
+    )
+    (root / "client" / "models.py").write_text(
+        "class User:\n    pass\n",
+        encoding="utf-8",
+    )
+    config_path = root / ".atlas"
+    config_path.mkdir()
+    config_path.joinpath("config.json").write_text(
+        json.dumps(
+            {
+                "project": "cross-repo",
+                "subsystems": [{"name": "default", "repos": ["api", "client"]}],
+                "languages": ["python"],
+                "exclude": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(root)
+    index_project(config)
+    conn = connect(config.db_path)
+    try:
+        refs = references(conn, "User")
+        assert len(refs) == 1
+        assert refs[0]["resolution_status"] == "unique_name"
+        assert refs[0]["resolved_symbol"] == "models.User"
+        assert refs[0]["source_repo"] == "api"
+        assert refs[0]["target_repo"] == "client"
+        assert refs[0]["cross_repo"] is True
+        assert refs[0]["confidence"] > 0.5
+    finally:
+        conn.close()
+
+
+def test_schema_migration_adds_reference_columns(tmp_path: pathlib.Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(db_path)
+    raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    raw.execute("INSERT INTO meta VALUES('schema_version', '1')")
+    raw.execute(
+        """
+        CREATE TABLE refs(
+          id INTEGER PRIMARY KEY,
+          source_file_id INTEGER NOT NULL,
+          source_repo_id INTEGER NOT NULL,
+          target_name TEXT NOT NULL,
+          target_symbol TEXT,
+          line INTEGER NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'import'
+        )
+        """
+    )
+    raw.execute(
+        "INSERT INTO refs(source_file_id, source_repo_id, target_name, line) VALUES(1,1,'demo',1)"
+    )
+    raw.execute(
+        "INSERT INTO refs(source_file_id, source_repo_id, target_name, line) VALUES(1,1,'demo',1)"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(refs)")}
+        assert {"target_symbol_id", "resolution_status", "resolution_method", "confidence"} <= columns
+        assert conn.execute("SELECT COUNT(*) FROM refs").fetchone()[0] == 1
+        version = conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()["value"]
+        assert int(version) == SCHEMA_VERSION
     finally:
         conn.close()
 

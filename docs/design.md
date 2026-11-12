@@ -59,7 +59,7 @@
       "repos": ["payment-core"]
     }
   ],
-  "languages": ["python", "typescript", "javascript", "go", "java"],
+  "languages": ["python", "typescript", "javascript", "go", "java", "rust"],
   "exclude": ["node_modules", "dist", "target", ".venv"]
 }
 ```
@@ -72,6 +72,7 @@
 | `files` | 文件路径、语言、内容 hash、mtime、文件级模块名 |
 | `symbols` | 符号名、限定名、类型、路径、行号范围、导出标记 |
 | `refs` | 源文件对目标符号的引用边 |
+| `refs` 字段 | `target_symbol_id`、`resolution_status`、`resolution_method`、`confidence` |
 | `index_state` | 仓库最后一次成功索引的 Git commit |
 | `index_diagnostics` | 文件级索引诊断 |
 | `memories` | 结构化记忆条目、证据、状态、置信度 |
@@ -84,6 +85,7 @@
 | 对象 | 状态 |
 | --- | --- |
 | 文件 | `valid` / `changed` |
+| 引用 | `resolved` / `unique_name` / `ambiguous` / `unresolved` |
 | 诊断 | `warning` / `error` |
 | 记忆 | `valid` / `stale` / `invalid` |
 | scope token | `active` / `used` / `expired` / `revoked` |
@@ -96,9 +98,20 @@
 2. 跳过 exclude 目录、隐藏目录、二进制文件和无扩展名文件。
 3. Python 文件使用 AST 抽取模块、类、函数、方法、导入。
 4. TypeScript/JavaScript 文件使用基础正则抽取类、函数、导出符号和 import。
-5. Go/Java 文件使用基础正则抽取包、导入、类型、函数/方法和入口符号。
+5. Go/Java/Rust 文件使用基础正则抽取包、导入、类型、函数/方法和入口符号。
 6. 内容 hash 不变时保留原记录，减少重复写入。
 7. 删除的文件同步移除对应符号和引用。
+
+### 引用解析
+
+Phase 2 在 import 边之上增加机械化的引用解析：
+
+1. 优先用目标限定名精确匹配符号，标记为 `resolved`，置信度 0.95。
+2. 精确匹配失败时，取 import 目标的最后一段做唯一名称匹配，标记为 `unique_name`，置信度 0.65。
+3. 同名候选超过一个时标记为 `ambiguous`，置信度 0.45，不绑定唯一 symbol id。
+4. 无法解析时保持 `unresolved`，检索时作为低置信 import 边返回。
+5. 跨仓解析结果返回目标 repo 和 `cross_repo=true`。
+6. 同一 source file、target、line、kind 的重复边在写入前去重。
 
 ### 增量索引
 
@@ -132,11 +145,12 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 1. 配置不存在或非法时，`init` / `index` / `serve` 立即失败并给出明确错误。
 2. 解析失败的文件记录为无符号，不阻断整体索引。
 3. 解析失败和无法解码的文件写入 `index_diagnostics`，并在 health 中返回计数。
-4. SQLite 使用 WAL，限制并发写冲突。
-5. MCP 查询缺少参数时返回协议级错误。
-6. scope token 不存在、过期、已撤销或范围不匹配时拒绝查询。
-7. 默认最多返回 50 条结果，可由调用参数调整，但上限为 200。
-8. 索引不尝试读取完整文件内容进入模型上下文。
+4. 旧数据库在连接时自动迁移缺失列；迁移只增加列和索引，不删除用户数据。
+5. SQLite 使用 WAL，限制并发写冲突。
+6. MCP 查询缺少参数时返回协议级错误。
+7. scope token 不存在、过期、已撤销或范围不匹配时拒绝查询。
+8. 默认最多返回 50 条结果，可由调用参数调整，但上限为 200。
+9. 索引不尝试读取完整文件内容进入模型上下文。
 
 ## 6. 安全与权限
 
@@ -179,9 +193,13 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 
 - [x] Go 基础符号与 import 抽取。
 - [x] Java 基础符号与 import 抽取。
+- [x] Rust 基础符号与 use/import 抽取。
 - [x] Git-aware 提交间增量索引。
 - [x] 非 Git 仓库自动降级全量索引。
 - [x] 索引诊断写入数据库并在 health 中展示。
+- [x] 引用边解析、置信度和跨仓标识。
+- [x] 重复引用边去重。
+- [x] schema 版本化与基础迁移。
 
 ## 8. 后续演进
 

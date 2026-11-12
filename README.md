@@ -4,7 +4,7 @@ ATLAS 是一个面向超大项目的分层项目知识系统。它把项目组�
 
 ## 当前状态
 
-项目处于 **Phase 2 索引可靠性切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、索引诊断、基础 scope token 和审计记录已经可用。
+项目处于 **Phase 2 索引可靠性切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java/Rust 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、引用解析置信度、索引诊断、基础 scope token 和审计记录已经可用。
 
 运行环境要求 Python 3.9+。
 
@@ -34,6 +34,19 @@ atlas serve /path/to/project
 ```
 
 建议把 `.atlas/` 加入目标项目的 `.gitignore`，避免提交本地索引数据库和 scope token。
+
+## 引用置信度
+
+引用结果区分四类解析状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `resolved` | 限定名精确匹配符号 |
+| `unique_name` | 目标最后一段在索引中唯一匹配 |
+| `ambiguous` | 有多个同名候选，只保留低置信边 |
+| `unresolved` | 只能确认 import/use 语法，未绑定符号 |
+
+`impact` 会包含低置信边，但结果中的 `confidence` 和 `resolution_status` 可用于下游 Agent 决定是否人工复核。
 
 ### Codex CLI 接入
 
