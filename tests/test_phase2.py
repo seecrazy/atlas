@@ -4,9 +4,10 @@ import sqlite3
 import subprocess
 
 from atlas.config import load_config, write_default_config
-from atlas.db import SCHEMA_VERSION, connect
+from atlas.db import SCHEMA_VERSION, connect, utcnow
 from atlas.indexer import index_project
-from atlas.store import health, references, search
+from atlas.router import route_request
+from atlas.store import health, impact, memories, references, review_memory, search
 
 
 def test_go_and_java_basic_index(tmp_path: pathlib.Path) -> None:
@@ -142,6 +143,104 @@ def test_reference_resolution_and_cross_repo(tmp_path: pathlib.Path) -> None:
         assert refs[0]["target_repo"] == "client"
         assert refs[0]["cross_repo"] is True
         assert refs[0]["confidence"] > 0.5
+    finally:
+        conn.close()
+
+
+def test_impact_confidence_filter(project_root: pathlib.Path) -> None:
+    config = load_config(project_root)
+    conn = connect(config.db_path)
+    try:
+        unfiltered = impact(conn, "RetryClient")
+        assert unfiltered["reference_count"] == 1
+        assert unfiltered["filtered_count"] == 0
+
+        strict = impact(conn, "RetryClient", min_confidence=0.95)
+        assert strict["min_confidence"] == 0.95
+        assert strict["reference_count"] == 0
+        assert strict["filtered_count"] == 1
+        assert strict["references_by_resolution"] == {"unique_name": 1}
+        assert references(conn, "RetryClient", min_confidence=0.95) == []
+    finally:
+        conn.close()
+
+
+def test_deterministic_router(project_root: pathlib.Path) -> None:
+    config = load_config(project_root)
+    conn = connect(config.db_path)
+    try:
+        implementation = route_request(
+            conn,
+            "Read the implementation of execute_with_backoff to find the timeout root cause",
+        )
+        assert implementation["intent"] == "implementation"
+        assert implementation["role"] == "developer"
+        assert implementation["scope_candidates"] == ["demo/retry"]
+        assert "indexed_symbol_candidates" in implementation["signals"]
+
+        impact_request = route_request(conn, "Which callers reference RetryClient?")
+        assert impact_request["intent"] == "impact"
+        assert impact_request["role"] == "system"
+        assert impact_request["reference_count"] >= 1
+
+        memory_request = route_request(conn, "Show me the revert lesson for retry")
+        assert memory_request["intent"] == "memory"
+        assert "atlas_memories" in memory_request["recommended_tools"]
+    finally:
+        conn.close()
+
+
+def test_memory_retrieval_and_review(project_root: pathlib.Path) -> None:
+    config = load_config(project_root)
+    conn = connect(config.db_path)
+    try:
+        file_id = conn.execute(
+            "SELECT id FROM files WHERE path = ?", ("demo/retry/handler.py",)
+        ).fetchone()["id"]
+        now = utcnow()
+        conn.execute(
+            """
+            INSERT INTO memories(memory_key, layer, claim, source, created_at, updated_at)
+            VALUES('mem-test', 'structural', 'RetryHandler owns retry behavior', 'test', ?, ?)
+            """,
+            (now, now),
+        )
+        memory_id = conn.execute(
+            "SELECT id FROM memories WHERE memory_key = 'mem-test'"
+        ).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO memory_evidence(memory_id, file_id, start_line, end_line) VALUES(?,?,1,3)",
+            (memory_id, file_id),
+        )
+        conn.commit()
+
+        rows = memories(conn, status="valid")
+        assert len(rows) == 1
+        assert rows[0]["evidence"][0]["file"] == "demo/retry/handler.py"
+
+        reviewed = review_memory(
+            conn,
+            memory_id,
+            "invalid",
+            reviewer="human-reviewer",
+            reason="claim no longer applies",
+        )
+        assert reviewed["status"] == "invalid"
+        assert not memories(conn, status="stale")
+        assert memories(conn, status="invalid")[0]["id"] == memory_id
+
+        revalidated = review_memory(
+            conn,
+            memory_id,
+            "valid",
+            reviewer="human-reviewer",
+            reason="verified against current implementation",
+        )
+        assert revalidated["status"] == "valid"
+        review_count = conn.execute(
+            "SELECT COUNT(*) FROM memory_reviews WHERE memory_id = ?", (memory_id,)
+        ).fetchone()[0]
+        assert review_count == 2
     finally:
         conn.close()
 

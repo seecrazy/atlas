@@ -28,6 +28,9 @@ def test_mcp_initialize_and_tools_list(project_root):
             "atlas_impact",
             "atlas_create_scope",
             "atlas_scoped_search",
+            "atlas_route",
+            "atlas_memories",
+            "atlas_review_memory",
         } <= names
     finally:
         server.close()

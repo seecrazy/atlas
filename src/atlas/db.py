@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS memory_evidence (
   PRIMARY KEY(memory_id, file_id)
 );
 
+CREATE TABLE IF NOT EXISTS memory_reviews (
+  id INTEGER PRIMARY KEY,
+  memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  reviewer TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scope_tokens (
   id INTEGER PRIMARY KEY,
   token TEXT NOT NULL UNIQUE,
@@ -128,6 +137,7 @@ CREATE TABLE IF NOT EXISTS index_diagnostics (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_evidence_file ON memory_evidence(file_id);
+CREATE INDEX IF NOT EXISTS idx_memory_reviews_memory ON memory_reviews(memory_id);
 CREATE INDEX IF NOT EXISTS idx_scope_token ON scope_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_diagnostics_repo ON index_diagnostics(repo_id, file_path);
@@ -143,6 +153,21 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_reviews (
+          id INTEGER PRIMARY KEY,
+          memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+          reviewer TEXT NOT NULL,
+          decision TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_reviews_memory ON memory_reviews(memory_id)"
+    )
     if "refs" not in {
         row["name"]
         for row in conn.execute(

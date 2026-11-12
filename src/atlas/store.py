@@ -32,6 +32,15 @@ def _like(term: str) -> str:
     return f"%{escaped}%"
 
 
+def _confidence(value: float | None) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    if value < 0.0 or value > 1.0:
+        raise ValueError("min_confidence must be between 0.0 and 1.0")
+    return value
+
+
 def health(conn: sqlite3.Connection) -> dict:
     def scalar(sql: str) -> int:
         row = conn.execute(sql).fetchone()
@@ -162,10 +171,17 @@ def symbols(
     ]
 
 
-def references(conn: sqlite3.Connection, symbol_name: str, limit: int | None = None) -> list[dict]:
+def references(
+    conn: sqlite3.Connection,
+    symbol_name: str,
+    limit: int | None = None,
+    *,
+    min_confidence: float | None = None,
+) -> list[dict]:
     if not symbol_name.strip():
         return []
     name = symbol_name.strip()
+    threshold = _confidence(min_confidence)
     rows = conn.execute(
         """
         SELECT
@@ -181,15 +197,18 @@ def references(conn: sqlite3.Connection, symbol_name: str, limit: int | None = N
         JOIN repos r ON r.id = ref.source_repo_id
         LEFT JOIN symbols sym ON sym.id = ref.target_symbol_id
         LEFT JOIN repos sr ON sr.id = sym.repo_id
-        WHERE ref.target_name = ?
+        WHERE (
+           ref.target_name = ?
            OR ref.target_name LIKE '%.' || ?
            OR ref.target_name LIKE '%/' || ?
            OR (ref.target_symbol_id IS NOT NULL AND sym.name = ?)
            OR (ref.target_symbol_id IS NOT NULL AND sym.qualified_name = ?)
+        )
+           AND (? IS NULL OR ref.confidence >= ?)
         ORDER BY f.path, ref.line
         LIMIT ?
         """,
-        (name, name, name, name, name, _limit(limit)),
+        (name, name, name, name, name, threshold, threshold, _limit(limit)),
     ).fetchall()
     return [
         {
@@ -214,14 +233,30 @@ def references(conn: sqlite3.Connection, symbol_name: str, limit: int | None = N
     ]
 
 
-def impact(conn: sqlite3.Connection, symbol_name: str, limit: int | None = None) -> dict:
-    refs = references(conn, symbol_name, limit=limit)
+def impact(
+    conn: sqlite3.Connection,
+    symbol_name: str,
+    limit: int | None = None,
+    *,
+    min_confidence: float | None = None,
+) -> dict:
+    all_refs = references(conn, symbol_name, limit=MAX_LIMIT)
+    threshold = _confidence(min_confidence)
+    refs = all_refs if threshold is None else [
+        ref for ref in all_refs if ref["confidence"] >= threshold
+    ]
     by_repo: dict[str, list[dict]] = {}
     for ref in refs:
         by_repo.setdefault(ref["source_repo"], []).append(ref)
+    by_resolution: dict[str, int] = {}
+    for ref in all_refs:
+        by_resolution[ref["resolution_status"]] = by_resolution.get(ref["resolution_status"], 0) + 1
     return {
         "symbol": symbol_name,
+        "min_confidence": threshold,
         "reference_count": len(refs),
+        "filtered_count": len(all_refs) - len(refs),
+        "references_by_resolution": by_resolution,
         "affected_repos": sorted(by_repo),
         "references": refs,
     }
@@ -412,4 +447,118 @@ def revoke_scope(conn: sqlite3.Connection, token: str) -> bool:
         audit(conn, "scope.revoked", {"token_hash": secrets.token_hex(8)})
         conn.commit()
     return changed
+
+
+def memories(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    layer: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    conditions = []
+    params: list[object] = []
+    if status is not None:
+        if status not in {"valid", "stale", "invalid"}:
+            raise ValueError("memory status must be valid, stale, or invalid")
+        conditions.append("m.status = ?")
+        params.append(status)
+    if layer is not None:
+        if layer not in {"structural", "semantic", "behavioral"}:
+            raise ValueError("memory layer must be structural, semantic, or behavioral")
+        conditions.append("m.layer = ?")
+        params.append(layer)
+    sql = "SELECT * FROM memories m"
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY m.updated_at DESC LIMIT ?"
+    params.append(_limit(limit))
+    rows = conn.execute(sql, params).fetchall()
+    result = []
+    for row in rows:
+        evidence = conn.execute(
+            """
+            SELECT e.start_line, e.end_line, f.path, f.language,
+                   r.name AS repo, r.subsystem
+            FROM memory_evidence e
+            JOIN files f ON f.id = e.file_id
+            JOIN repos r ON r.id = f.repo_id
+            WHERE e.memory_id = ?
+            ORDER BY f.path, e.start_line
+            """,
+            (row["id"],),
+        ).fetchall()
+        result.append(
+            {
+                "id": row["id"],
+                "memory_key": row["memory_key"],
+                "layer": row["layer"],
+                "claim": row["claim"],
+                "status": row["status"],
+                "confidence": row["confidence"],
+                "utility_score": row["utility_score"],
+                "updated_at": row["updated_at"],
+                "evidence": [
+                    {
+                        "repo": item["repo"],
+                        "subsystem": item["subsystem"],
+                        "file": item["path"],
+                        "start_line": item["start_line"],
+                        "end_line": item["end_line"],
+                        "language": item["language"],
+                    }
+                    for item in evidence
+                ],
+            }
+        )
+    return result
+
+
+def review_memory(
+    conn: sqlite3.Connection,
+    memory_id: int,
+    decision: str,
+    *,
+    reviewer: str,
+    reason: str,
+) -> dict:
+    if decision not in {"valid", "invalid"}:
+        raise ValueError("memory review decision must be valid or invalid")
+    if not reviewer.strip():
+        raise ValueError("reviewer must be a non-empty string")
+    if not reason.strip():
+        raise ValueError("reason must be a non-empty string")
+    row = conn.execute("SELECT id FROM memories WHERE id = ?", (int(memory_id),)).fetchone()
+    if row is None:
+        raise FileNotFoundError(f"memory not found: {memory_id}")
+    now = utcnow()
+    conn.execute(
+        "UPDATE memories SET status = ?, updated_at = ? WHERE id = ?",
+        (decision, now, int(memory_id)),
+    )
+    conn.execute(
+        """
+        INSERT INTO memory_reviews(memory_id, reviewer, decision, reason, created_at)
+        VALUES(?,?,?,?,?)
+        """,
+        (int(memory_id), reviewer.strip(), decision, reason.strip(), now),
+    )
+    audit(
+        conn,
+        "memory.reviewed",
+        {
+            "memory_id": int(memory_id),
+            "decision": decision,
+            "reason": reason.strip(),
+        },
+        actor=reviewer.strip(),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM memories WHERE id = ?", (int(memory_id),)).fetchone()
+    return {
+        "id": updated["id"],
+        "memory_key": updated["memory_key"],
+        "status": updated["status"],
+        "updated_at": updated["updated_at"],
+    }
 

@@ -4,7 +4,7 @@ ATLAS 是一个面向超大项目的分层项目知识系统。它把项目组�
 
 ## 当前状态
 
-项目处于 **Phase 2 索引可靠性切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java/Rust 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、引用解析置信度、索引诊断、基础 scope token 和审计记录已经可用。
+项目处于 **Phase 4 确定性路由切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java/Rust 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、引用解析置信度、确定性 Router、记忆复核闭环、索引诊断、基础 scope token 和审计记录已经可用。
 
 运行环境要求 Python 3.9+。
 
@@ -48,6 +48,14 @@ atlas serve /path/to/project
 
 `impact` 会包含低置信边，但结果中的 `confidence` 和 `resolution_status` 可用于下游 Agent 决定是否人工复核。
 
+设置 `min_confidence` 可以在服务端过滤噪声边。返回结果仍会说明被过滤的数量，避免静默丢数据。
+
+## Router
+
+`atlas_route` 是确定性 Router 原型，不调用 LLM。它根据问题关键词、索引候选和引用信号输出 `intent`、`role`、`confidence`、推荐工具、scope 候选和 warning。
+
+当前 Router 不执行代码修改，也不直接读取函数体。
+
 ### Codex CLI 接入
 
 ```bash
@@ -72,6 +80,9 @@ args = ["--project-root", "/absolute/path/to/project"]
 | `atlas_references` | 查询符号引用 |
 | `atlas_impact` | 评估修改某符号时受影响的下游位置 |
 | `atlas_file_context` | 返回文件的符号结构摘要，不返回完整代码 |
+| `atlas_route` | 对问题做确定性路由分类 |
+| `atlas_memories` | 查询记忆及证据状态 |
+| `atlas_review_memory` | 提交记忆复核决策 |
 | `atlas_create_scope` | 创建短期受限访问 token |
 | `atlas_scoped_search` | 携带 scope token 在授权范围内查询 |
 
@@ -82,6 +93,7 @@ args = ["--project-root", "/absolute/path/to/project"]
 - [设计方案](docs/design.md)
 - [路线图](docs/roadmap.md)
 - [架构决策记录](docs/adr/0001-local-sqlite-and-mcp.md)
+- [确定性 Router ADR](docs/adr/0002-deterministic-router-first.md)
 - [交接记录](docs/HANDOFF.md)
 
 ## 开发

@@ -77,6 +77,7 @@
 | `index_diagnostics` | 文件级索引诊断 |
 | `memories` | 结构化记忆条目、证据、状态、置信度 |
 | `memory_evidence` | 记忆条目与文件证据的关联 |
+| `memory_reviews` | 外部审查者对记忆的复核决策 |
 | `scope_tokens` | 短期 token、路径边界、状态、过期时间 |
 | `audit_events` | 工具调用、scope 创建、记忆漂移等审计事件 |
 
@@ -127,6 +128,36 @@ Phase 2 引入 Git-aware 增量模式：
 
 当前增量索引只覆盖提交间变化，不承诺处理所有未提交工作区状态。未提交变更可以直接使用 `atlas index --full` 重建。
 
+### Router
+
+Phase 4 首先引入确定性 Router，而不是先引入 LLM Router：
+
+1. 输入是开发者问题。
+2. Router 使用关键词规则和索引候选决定 intent 与目标角色。
+3. 输出固定 schema：`intent`、`role`、`confidence`、`signals`、`recommended_tools`、`scope_candidates`、`warnings`。
+4. Router 不直接读函数体，不越权执行修改。
+5. 路由结果写入审计事件，便于后续统计误路由率。
+
+四类 intent 映射如下：
+
+| intent | 典型角色 | 推荐工具 |
+| --- | --- | --- |
+| `locate` | module / system | `atlas_search`, `atlas_symbols`, `atlas_file_context` |
+| `impact` | architect / system | `atlas_references`, `atlas_impact` |
+| `implementation` | developer | `atlas_scoped_search`, `atlas_file_context` |
+| `memory` | module / system | `atlas_memories`, `atlas_file_context` |
+
+Router 的置信度只表示「分类规则和索引信号是否一致」，不等于答案正确性。
+
+### 影响分析过滤
+
+`atlas_impact` 支持服务端 `min_confidence` 过滤：
+
+1. `resolved` 默认置信度 0.95，`unique_name` 0.65。
+2. `ambiguous` 和 `unresolved` 默认低于 0.65。
+3. 调用方可以设置 `min_confidence=0.65` 排除噪声边。
+4. 返回值同时给出 `filtered_count` 和 `references_by_resolution`，避免静默丢数据。
+
 ### MCP
 
 Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`tools/call`。工具返回结构化摘要，限制输出条数，避免一次性返回大段代码。
@@ -140,17 +171,26 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 5. 查询结果仅保留 token 范围内的路径。
 6. token 记录 `used_at`，可继续审计使用历史。
 
+### 记忆检索与复核
+
+1. `atlas_memories` 按 `valid` / `stale` / `invalid` 列出记忆及其证据文件。
+2. stale 记忆默认不会被静默混入普通索引答案。
+3. `atlas_review_memory` 由外部审查者提交 `valid` 或 `invalid` 决策。
+4. 复核结果写入 `memory_reviews`，同步更新记忆状态和 `updated_at`。
+5. ATLAS 只保存决策与证据，不假装自动理解语义。
+
 ## 5. 边界与错误处理
 
 1. 配置不存在或非法时，`init` / `index` / `serve` 立即失败并给出明确错误。
 2. 解析失败的文件记录为无符号，不阻断整体索引。
 3. 解析失败和无法解码的文件写入 `index_diagnostics`，并在 health 中返回计数。
-4. 旧数据库在连接时自动迁移缺失列；迁移只增加列和索引，不删除用户数据。
+4. 旧数据库在连接时自动迁移缺失列和 `memory_reviews`；迁移只增加列、表和索引，不删除用户数据。
 5. SQLite 使用 WAL，限制并发写冲突。
 6. MCP 查询缺少参数时返回协议级错误。
 7. scope token 不存在、过期、已撤销或范围不匹配时拒绝查询。
-8. 默认最多返回 50 条结果，可由调用参数调整，但上限为 200。
-9. 索引不尝试读取完整文件内容进入模型上下文。
+8. `min_confidence` 被限制在 0.0 到 1.0。
+9. 默认最多返回 50 条结果，可由调用参数调整，但上限为 200。
+10. 索引不尝试读取完整文件内容进入模型上下文。
 
 ## 6. 安全与权限
 
@@ -158,7 +198,8 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 2. 数据库和 scope token 保存在项目 `.atlas/` 目录内。
 3. 高危操作当前不存在。
 4. scope token 是服务端校验对象，不能由客户端修改路径范围。
-5. 所有 scope 创建和使用事件写入审计表。
+5. 记忆复核是唯一的运行时记忆状态写入入口，决策来源和原因会被审计。
+6. 所有 scope 创建和使用事件写入审计表。
 
 ## 7. 验收清单
 
@@ -200,6 +241,14 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 - [x] 引用边解析、置信度和跨仓标识。
 - [x] 重复引用边去重。
 - [x] schema 版本化与基础迁移。
+
+### Phase 4 Router 与记忆复核
+
+- [x] 确定性 Router 输出固定分类 schema。
+- [x] `atlas_route` MCP 工具。
+- [x] `atlas_impact` 支持 `min_confidence`。
+- [x] `atlas_memories` 返回证据引用。
+- [x] `atlas_review_memory` 保存复核决策。
 
 ## 8. 后续演进
 

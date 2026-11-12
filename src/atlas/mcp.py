@@ -15,11 +15,14 @@ from .store import (
     file_context,
     health,
     impact,
+    memories,
     references,
     scoped_search,
     search,
+    review_memory,
     symbols,
 )
+from .router import route_request
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -78,8 +81,56 @@ TOOLS = [
             "properties": {
                 "symbol": {"type": "string", "minLength": 1},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
             },
             "required": ["symbol"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_route",
+        "description": "Classify a request into intent, role, recommended tools, and optional scope candidates.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_memories",
+        "description": "List memories with evidence references and drift status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["valid", "stale", "invalid"],
+                },
+                "layer": {
+                    "type": "string",
+                    "enum": ["structural", "semantic", "behavioral"],
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_review_memory",
+        "description": "Record an external reviewer decision that a memory is still valid or invalid.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "integer", "minimum": 1},
+                "decision": {"type": "string", "enum": ["valid", "invalid"]},
+                "reviewer": {"type": "string", "minLength": 1},
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "required": ["memory_id", "decision", "reviewer", "reason"],
             "additionalProperties": False,
         },
     },
@@ -165,7 +216,12 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
     if name == "atlas_references":
         return references(conn, args["symbol"], limit=args.get("limit"))
     if name == "atlas_impact":
-        return impact(conn, args["symbol"], limit=args.get("limit"))
+        return impact(
+            conn,
+            args["symbol"],
+            limit=args.get("limit"),
+            min_confidence=args.get("min_confidence"),
+        )
     if name == "atlas_file_context":
         return file_context(conn, args["file_path"], limit=args.get("limit"))
     if name == "atlas_create_scope":
@@ -183,6 +239,23 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             args["query"],
             limit=args.get("limit"),
             actor="mcp",
+        )
+    if name == "atlas_route":
+        return route_request(conn, args["question"], limit=args.get("limit", 10))
+    if name == "atlas_memories":
+        return memories(
+            conn,
+            status=args.get("status"),
+            layer=args.get("layer"),
+            limit=args.get("limit"),
+        )
+    if name == "atlas_review_memory":
+        return review_memory(
+            conn,
+            args["memory_id"],
+            args["decision"],
+            reviewer=args["reviewer"],
+            reason=args["reason"],
         )
     raise KeyError(name)
 
