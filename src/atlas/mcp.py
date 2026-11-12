@@ -17,6 +17,7 @@ from .store import (
     health,
     impact,
     memories,
+    impact_chain,
     references,
     scoped_search,
     search,
@@ -24,6 +25,7 @@ from .store import (
     symbols,
 )
 from .router import route_request
+from .synthesis import converge_findings
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -77,6 +79,20 @@ TOOLS = [
     {
         "name": "atlas_impact",
         "description": "Summarize downstream files and repositories affected by a symbol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["symbol"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_impact_chain",
+        "description": "Return direct references and one module-level upstream hop.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -189,6 +205,62 @@ TOOLS = [
         },
     },
     {
+        "name": "atlas_converge",
+        "description": "Converge role worker findings into an ordered upward synthesis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+                "findings": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {
+                                "type": "string",
+                                "enum": ["developer", "module", "system", "architect"],
+                            },
+                            "claim": {"type": "string", "minLength": 1},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                            "evidence": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {"type": "string", "minLength": 1},
+                                        "line": {"type": "integer", "minimum": 1},
+                                        "repo": {"type": "string"},
+                                        "note": {"type": "string"},
+                                    },
+                                    "required": ["file"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "warnings": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "recommended_actions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["role", "claim", "evidence"],
+                        "additionalProperties": False,
+                    },
+                },
+                "route": {"type": "object"},
+                "impact_symbol": {"type": "string", "minLength": 1},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": ["question", "findings"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "atlas_create_scope",
         "description": "Create a short-lived scope token. Intended for trusted orchestration.",
         "inputSchema": {
@@ -263,6 +335,13 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             limit=args.get("limit"),
             min_confidence=args.get("min_confidence"),
         )
+    if name == "atlas_impact_chain":
+        return impact_chain(
+            conn,
+            args["symbol"],
+            limit=args.get("limit"),
+            min_confidence=args.get("min_confidence"),
+        )
     if name == "atlas_file_context":
         return file_context(conn, args["file_path"], limit=args.get("limit"))
     if name == "atlas_system_context":
@@ -280,6 +359,16 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             args["file_path"],
             symbol=args.get("symbol"),
             limit=args.get("limit"),
+        )
+    if name == "atlas_converge":
+        return converge_findings(
+            conn,
+            args["question"],
+            args["findings"],
+            route=args.get("route"),
+            impact_symbol=args.get("impact_symbol"),
+            min_confidence=args.get("min_confidence", 0.65),
+            limit=args.get("limit", 50),
         )
     if name == "atlas_create_scope":
         return create_scope(

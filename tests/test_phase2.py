@@ -9,6 +9,8 @@ from atlas.db import SCHEMA_VERSION, connect, utcnow
 from atlas.indexer import index_project
 from atlas.router import route_request
 from atlas.store import health, impact, memories, references, review_memory, search
+from atlas.store import impact_chain
+from atlas.synthesis import converge_findings
 
 
 def test_go_and_java_basic_index(tmp_path: pathlib.Path) -> None:
@@ -199,6 +201,137 @@ def test_system_module_and_developer_context(project_root: pathlib.Path) -> None
         assert developer["scope_candidates"] == ["demo/client"]
         assert developer["contains_source_text"] is False
         assert "demo/client/Gateway.ts" in developer["related_files"]
+    finally:
+        conn.close()
+
+
+def test_impact_chain(project_root: pathlib.Path) -> None:
+    config = load_config(project_root)
+    conn = connect(config.db_path)
+    try:
+        chain = impact_chain(conn, "RetryClient", min_confidence=0.65)
+        assert chain["max_hops"] == 2
+        assert chain["direct_reference_count"] == 1
+        assert chain["first_hop"][0]["source_file"] == "demo/client/Gateway.ts"
+        assert chain["second_hop_reference_count"] == 0
+    finally:
+        conn.close()
+
+
+def test_impact_chain_second_hop(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "chain"
+    root.mkdir()
+    (root / "core.py").write_text("class Base:\n    pass\n", encoding="utf-8")
+    (root / "mid.py").write_text(
+        "from core import Base\n\n\nclass Middle(Base):\n    pass\n",
+        encoding="utf-8",
+    )
+    (root / "top.py").write_text(
+        "from mid import Middle\n\n\nclass Top(Middle):\n    pass\n",
+        encoding="utf-8",
+    )
+    write_default_config(root, overwrite=True)
+    config = load_config(root)
+    index_project(config, full=True)
+    conn = connect(config.db_path)
+    try:
+        chain = impact_chain(conn, "Base", min_confidence=0.65)
+        assert chain["direct_reference_count"] == 1
+        assert chain["first_hop"][0]["source_file"] == "chain/mid.py"
+        assert chain["second_hop_reference_count"] == 1
+        assert chain["second_hop"][0]["source_file"] == "chain/top.py"
+        assert chain["second_hop"][0]["first_hop_file"] == "chain/mid.py"
+    finally:
+        conn.close()
+
+
+def test_converge_findings(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "converge"
+    root.mkdir()
+    (root / "core.py").write_text("class Base:\n    pass\n", encoding="utf-8")
+    (root / "mid.py").write_text(
+        "from core import Base\n\n\nclass Middle(Base):\n    pass\n",
+        encoding="utf-8",
+    )
+    (root / "top.py").write_text(
+        "from mid import Middle\n\n\nclass Top(Middle):\n    pass\n",
+        encoding="utf-8",
+    )
+    write_default_config(root, overwrite=True)
+    config = load_config(root)
+    index_project(config, full=True)
+    conn = connect(config.db_path)
+    findings = [
+        {
+            "role": "architect",
+            "claim": "Top depends on Base through Middle",
+            "confidence": 0.8,
+            "evidence": [{"file": "converge/top.py", "line": 1}],
+            "recommended_actions": ["verify contract compatibility"],
+        },
+        {
+            "role": "developer",
+            "claim": "Base is defined in core.py",
+            "confidence": 0.9,
+            "evidence": [{"file": "converge/core.py", "line": 1}],
+        },
+        {
+            "role": "module",
+            "claim": "Middle imports Base and is imported by Top",
+            "confidence": 0.75,
+            "evidence": [{"file": "converge/mid.py", "line": 1}],
+        },
+        {
+            "role": "system",
+            "claim": "No separate deployment unit is visible",
+            "confidence": 0.7,
+            "evidence": [{"file": "converge/top.py", "line": 1}],
+        },
+    ]
+    try:
+        result = converge_findings(
+            conn,
+            "What happens if Base changes?",
+            findings,
+            impact_symbol="Base",
+            min_confidence=0.65,
+        )
+        assert [item["role"] for item in result["ordered_findings"]] == [
+            "developer", "module", "system", "architect"
+        ]
+        assert result["missing_layers"] == []
+        assert result["impact_propagation"]["second_hop_reference_count"] == 1
+        assert result["answer_sections"]["implementation_findings"][0]["claim"]
+        assert result["evidence_files"] == [
+            "converge/core.py", "converge/mid.py", "converge/top.py"
+        ]
+    finally:
+        conn.close()
+
+
+def test_converge_rejects_unindexed_evidence(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "bad-converge"
+    root.mkdir()
+    (root / "app.py").write_text("def run():\n    pass\n", encoding="utf-8")
+    write_default_config(root, overwrite=True)
+    config = load_config(root)
+    index_project(config, full=True)
+    conn = connect(config.db_path)
+    try:
+        import pytest
+
+        with pytest.raises(FileNotFoundError):
+            converge_findings(
+                conn,
+                "What changed?",
+                [
+                    {
+                        "role": "developer",
+                        "claim": "bad evidence",
+                        "evidence": [{"file": "does/not/exist.py", "line": 1}],
+                    }
+                ],
+            )
     finally:
         conn.close()
 

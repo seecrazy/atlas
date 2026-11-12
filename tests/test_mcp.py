@@ -26,6 +26,8 @@ def test_mcp_initialize_and_tools_list(project_root):
             "atlas_search",
             "atlas_references",
             "atlas_impact",
+            "atlas_impact_chain",
+            "atlas_converge",
             "atlas_system_context",
             "atlas_module_context",
             "atlas_developer_context",

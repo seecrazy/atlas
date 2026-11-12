@@ -158,6 +158,16 @@ Router 的置信度只表示「分类规则和索引信号是否一致」，不�
 3. 调用方可以设置 `min_confidence=0.65` 排除噪声边。
 4. 返回值同时给出 `filtered_count` 和 `references_by_resolution`，避免静默丢数据。
 
+### 影响传播链
+
+`atlas_impact_chain` 在 `atlas_impact` 之上增加两级传播：
+
+1. 第一跳：目标符号的直接引用。
+2. 第二跳：引用目标符号所在文件中的其他导出符号的上游文件。
+3. 每跳都受 `min_confidence` 过滤。
+4. 结果保留跳数、来源文件、目标文件、引用状态和置信度。
+5. 当前链路基于 import/use 边，不假设真实函数调用图。
+
 ### 上下文包
 
 Phase 4 将上下文包构建做成固定边界的服务端能力：
@@ -176,6 +186,29 @@ Phase 4 将上下文包构建做成固定边界的服务端能力：
 4. developer 包只针对一个文件；指定 symbol 时进一步收窄到该符号。
 5. developer 包返回 scope 候选，但不自动创建 scope token。
 6. 任一层查询的文件/仓库不存在时返回显式错误，不返回空假成功。
+
+### 上行回溯汇聚
+
+`atlas_converge` 接收多个角色 Worker 的结构化发现，按上行顺序汇聚：
+
+1. `developer` 返回目标实现发现。
+2. `module` 叠加模块边界、测试位置、入向依赖。
+3. `system` 叠加仓库、部署和同步注意事项。
+4. `architect` 叠加跨子系统契约和传播影响。
+
+输入 schema：
+
+| 字段 | 说明 |
+| --- | --- |
+| `question` | 原始开发者问题 |
+| `findings` | 角色发现数组，每项必须有 `role`、`claim`、`evidence` |
+| `route` | 可选，传入 `atlas_route` 结果 |
+| `impact_symbol` | 可选，触发影响传播链 |
+| `min_confidence` | 可选，影响边过滤阈值 |
+
+每个 finding 的 evidence 必须引用索引文件路径和正整数行号；Server 会校验文件路径存在于索引中。
+
+输出固定包含 ordered findings、role summary、missing layers、cross-repo evidence、可选 impact propagation、answer sections 和 warnings。汇聚器不生成代码，不自动提交修改，也不把缺少证据的 finding 当作可执行结论。
 
 ### MCP
 
@@ -211,6 +244,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 9. 默认最多返回 50 条结果，可由调用参数调整，但上限为 200。
 10. 索引不尝试读取完整文件内容进入模型上下文。
 11. developer 上下文包只提供结构和引用边界；访问完整源码仍必须通过外部工具和 scope token。
+12. 汇聚输入中的 evidence 文件必须在索引中存在；不存在时返回显式错误。
 
 ## 6. 安全与权限
 
@@ -272,6 +306,8 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 - [x] `atlas_system_context` 构建系统层包。
 - [x] `atlas_module_context` 构建模块层包。
 - [x] `atlas_developer_context` 构建开发层包。
+- [x] `atlas_impact_chain` 输出两级影响传播链。
+- [x] `atlas_converge` 按上行顺序汇聚角色发现。
 
 ## 8. 后续演进
 

@@ -66,6 +66,12 @@ ATLAS 提供三层结构化上下文包，帮助不同粒度的 Agent 只接收�
 
 这些工具不返回完整源码。开发 Agent 访问完整实现仍应通过外部文件工具，并使用 scope token 限制边界。
 
+## 回溯汇聚
+
+`atlas_converge` 接收 developer / module / system / architect 四层 Worker 的结构化发现，按 developer → module → system → architect 的顺序汇聚。每条发现必须携带索引中的文件证据；可选 `impact_symbol` 会生成影响传播链。
+
+汇聚器只做结构化汇总和证据校验，不生成代码，也不自动提交修改。
+
 ### Codex CLI 接入
 
 ```bash
@@ -94,6 +100,8 @@ args = ["--project-root", "/absolute/path/to/project"]
 | `atlas_system_context` | 构建子系统/仓库与跨仓引用包 |
 | `atlas_module_context` | 构建文件符号边界和依赖包 |
 | `atlas_developer_context` | 构建目标符号的窄化开发上下文 |
+| `atlas_impact_chain` | 输出两级影响传播链 |
+| `atlas_converge` | 按角色上行汇聚结构化发现 |
 | `atlas_memories` | 查询记忆及证据状态 |
 | `atlas_review_memory` | 提交记忆复核决策 |
 | `atlas_create_scope` | 创建短期受限访问 token |

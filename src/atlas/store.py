@@ -262,6 +262,101 @@ def impact(
     }
 
 
+def impact_chain(
+    conn: sqlite3.Connection,
+    symbol_name: str,
+    *,
+    limit: int | None = None,
+    min_confidence: float | None = None,
+) -> dict:
+    """Return direct references plus one module-level upstream hop.
+
+    The first hop is a direct reference to the target symbol. The second hop is
+    a reference to any symbol exported from a first-hop source file. This is an
+    import/use graph, not a precise function-call graph.
+    """
+    threshold = _confidence(min_confidence)
+    limit = _limit(limit)
+    base = impact(conn, symbol_name, limit=limit, min_confidence=threshold)
+    direct = base["references"]
+
+    direct_file_ids: dict[str, int] = {}
+    for ref in direct:
+        row = conn.execute(
+            "SELECT id FROM files WHERE path = ?", (ref["source_file"],)
+        ).fetchone()
+        if row is not None:
+            direct_file_ids[ref["source_file"]] = int(row["id"])
+
+    second_hop: list[dict] = []
+    if direct_file_ids:
+        file_ids = list(direct_file_ids.values())
+        placeholders = ",".join("?" for _ in file_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+              ref2.target_name, ref2.target_symbol, ref2.resolution_status,
+              ref2.resolution_method, ref2.confidence, ref2.line, ref2.kind,
+              r2.name AS repo, r2.subsystem, sf2.path AS source_file,
+              tf2.path AS first_hop_file,
+              ts2.name AS first_hop_symbol
+            FROM refs ref2
+            JOIN symbols ts2 ON ts2.id = ref2.target_symbol_id
+            JOIN files tf2 ON tf2.id = ts2.file_id
+            JOIN files sf2 ON sf2.id = ref2.source_file_id
+            JOIN repos r2 ON r2.id = ref2.source_repo_id
+            WHERE tf2.id IN ({placeholders})
+              AND (? IS NULL OR ref2.confidence >= ?)
+            ORDER BY sf2.path, ref2.line
+            LIMIT ?
+            """,
+            (*file_ids, threshold, threshold, limit),
+        ).fetchall()
+        seen_ids: set[tuple[str, str, int, str]] = set()
+        for row in rows:
+            key = (
+                row["source_file"],
+                row["target_name"],
+                row["line"],
+                row["first_hop_file"],
+            )
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            second_hop.append(
+                {
+                    "target": row["target_name"],
+                    "resolved_symbol": row["target_symbol"],
+                    "resolution_status": row["resolution_status"],
+                    "resolution_method": row["resolution_method"],
+                    "confidence": row["confidence"],
+                    "source_repo": row["repo"],
+                    "subsystem": row["subsystem"],
+                    "source_file": row["source_file"],
+                    "line": row["line"],
+                    "kind": row["kind"],
+                    "first_hop_file": row["first_hop_file"],
+                    "first_hop_symbol": row["first_hop_symbol"],
+                }
+            )
+
+    repos = sorted(
+        {ref["source_repo"] for ref in direct}
+        | {ref["source_repo"] for ref in second_hop}
+    )
+    return {
+        "symbol": symbol_name,
+        "min_confidence": threshold,
+        "max_hops": 2,
+        "direct_reference_count": len(direct),
+        "second_hop_reference_count": len(second_hop),
+        "affected_repos": repos,
+        "first_hop": direct,
+        "second_hop": second_hop,
+        "warnings": [] if direct else ["no direct references; chain is incomplete"],
+    }
+
+
 def file_context(conn: sqlite3.Connection, file_path: str, limit: int | None = None) -> dict:
     file_row = conn.execute(
         """
