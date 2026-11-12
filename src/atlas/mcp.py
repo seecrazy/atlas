@@ -28,6 +28,12 @@ from .router import route_request
 from .propagation import export_propagation
 from .pipeline import run_pipeline
 from .synthesis import converge_findings
+from .memory import generate_semantic_memories, auto_review_stale_memories, extract_revert_lessons
+from .architecture import sync_contracts, list_contracts, contract_impact, ingest_architecture_docs, list_architecture_docs
+from .agents import run_layered_agents
+from .kernel import list_approvals, decide_approval
+from .changes import propose_patch, decide_patch, apply_patch, list_patches
+from .evolution import distill_strategy_rules, evaluate_variant, list_variants
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -176,6 +182,202 @@ TOOLS = [
                 "reason": {"type": "string", "minLength": 1},
             },
             "required": ["memory_id", "decision", "reviewer", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_generate_memories",
+        "description": "Generate semantic memories for files, repos, and subsystems.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string"},
+                "use_llm": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_auto_review_memories",
+        "description": "Automatically review stale memories against current evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 500}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_extract_lessons",
+        "description": "Extract behavioral lessons from git revert commits.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_sync_contracts",
+        "description": "Sync explicit architecture contracts from project config.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "atlas_contracts",
+        "description": "List architecture contracts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_contract_impact",
+        "description": "Evaluate references affected by a named contract.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_index_architecture_docs",
+        "description": "Index configured architecture documents and ADRs.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "atlas_architecture_docs",
+        "description": "List indexed architecture documents.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_layered_agents",
+        "description": "Run architect, system, module, and developer role agents.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+                "use_llm": {"type": "boolean"},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_approvals",
+        "description": "List kernel approval requests.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "approved", "rejected"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_decide_approval",
+        "description": "Approve or reject a kernel action.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "approval_id": {"type": "integer", "minimum": 1},
+                "decision": {"type": "string", "enum": ["approved", "rejected"]},
+                "approver": {"type": "string", "minLength": 1},
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "required": ["approval_id", "decision", "approver", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_patches",
+        "description": "List proposed patches without full text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "approved", "rejected", "applied"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_propose_patch",
+        "description": "Propose an exact-text patch and request high-risk approval.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "minLength": 1},
+                "old_text": {"type": "string", "minLength": 1},
+                "new_text": {"type": "string", "minLength": 1},
+                "title": {"type": "string", "minLength": 1},
+                "created_by": {"type": "string", "minLength": 1},
+            },
+            "required": ["file_path", "old_text", "new_text", "title", "created_by"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_decide_patch",
+        "description": "Approve or reject a proposed patch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "patch_key": {"type": "string", "minLength": 1},
+                "decision": {"type": "string", "enum": ["approved", "rejected"]},
+                "approver": {"type": "string", "minLength": 1},
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "required": ["patch_key", "decision", "approver", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_apply_patch",
+        "description": "Apply an approved patch, optionally with a sandbox test command.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "patch_key": {"type": "string", "minLength": 1},
+                "applied_by": {"type": "string", "minLength": 1},
+                "test_command": {"type": "string"},
+            },
+            "required": ["patch_key", "applied_by"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_distill_strategies",
+        "description": "Distill strategy rules from recent router audits.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 500}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_evaluate_variant",
+        "description": "Evaluate an offline evolution variant against frozen cases.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "variant_key": {"type": "string", "minLength": 1},
+                "record": {"type": "boolean"},
+            },
+            "required": ["variant_key"],
             "additionalProperties": False,
         },
     },
@@ -444,6 +646,82 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             reviewer=args["reviewer"],
             reason=args["reason"],
         )
+    if name == "atlas_generate_memories":
+        return generate_semantic_memories(
+            conn,
+            config,
+            scope=args.get("scope"),
+            use_llm=args.get("use_llm", True),
+        )
+    if name == "atlas_auto_review_memories":
+        return auto_review_stale_memories(conn, limit=args.get("limit", 100))
+    if name == "atlas_extract_lessons":
+        return extract_revert_lessons(conn, config, limit=args.get("limit", 20))
+    if name == "atlas_sync_contracts":
+        return sync_contracts(conn, config)
+    if name == "atlas_contracts":
+        return list_contracts(conn, limit=args.get("limit", 100))
+    if name == "atlas_contract_impact":
+        return contract_impact(
+            conn,
+            args["name"],
+            limit=args.get("limit", 100),
+            min_confidence=args.get("min_confidence", 0.65),
+        )
+    if name == "atlas_index_architecture_docs":
+        return ingest_architecture_docs(conn, config)
+    if name == "atlas_architecture_docs":
+        return list_architecture_docs(conn, kind=args.get("kind"), limit=args.get("limit", 100))
+    if name == "atlas_layered_agents":
+        return run_layered_agents(
+            conn,
+            config,
+            args["question"],
+            use_llm=args.get("use_llm", True),
+            min_confidence=args.get("min_confidence", 0.65),
+            limit=args.get("limit", 50),
+        )
+    if name == "atlas_approvals":
+        return list_approvals(conn, status=args.get("status"), limit=args.get("limit", 50))
+    if name == "atlas_decide_approval":
+        return decide_approval(
+            conn,
+            args["approval_id"],
+            args["decision"],
+            approver=args["approver"],
+            reason=args["reason"],
+        )
+    if name == "atlas_patches":
+        return list_patches(conn, status=args.get("status"), limit=args.get("limit", 50))
+    if name == "atlas_propose_patch":
+        return propose_patch(
+            conn,
+            config,
+            args["file_path"],
+            old_text=args["old_text"],
+            new_text=args["new_text"],
+            title=args["title"],
+            created_by=args["created_by"],
+        )
+    if name == "atlas_decide_patch":
+        return decide_patch(
+            conn,
+            args["patch_key"],
+            args["decision"],
+            approver=args["approver"],
+            reason=args["reason"],
+        )
+    if name == "atlas_apply_patch":
+        return apply_patch(
+            conn,
+            args["patch_key"],
+            applied_by=args["applied_by"],
+            test_command=args.get("test_command"),
+        )
+    if name == "atlas_distill_strategies":
+        return distill_strategy_rules(conn, limit=args.get("limit", 100))
+    if name == "atlas_evaluate_variant":
+        return evaluate_variant(conn, config, args["variant_key"], record=args.get("record", True))
     raise KeyError(name)
 
 

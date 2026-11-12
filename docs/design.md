@@ -8,17 +8,12 @@
 2. 通过本地 SQLite 和 MCP 工具提供低延迟、可验证的结构查询能力。
 3. 支持多仓注册、跨仓引用、影响分析和基础记忆漂移。
 4. 使用服务端短期 scope token 控制子任务访问边界。
-5. 所有索引查询、scope 授权和记忆状态变化留下审计记录。
-
-### 非目标
-
-以下内容不在当前垂直切片中实现：
-
-1. 四层角色 Agent 的完整调度闭环。
-2. LLM 全量语义摘要。
-3. 直接修改代码、创建 PR 或执行构建。
-4. 运行时自我修改或进化闭环。
-5. 权限变更、删除、支付等高危操作。
+5. 所有索引查询、scope 授权、记忆状态变化和高危操作留下审计记录。
+6. 通过 L1 内核预算、审批和验证约束四层 Agent。
+7. 生成结构证据驱动的语义记忆，并支持 stale 自动复核。
+8. 支持架构契约、ADR/文档知识源和契约影响分析。
+9. 支持可选 LLM Worker；无 LLM 配置时自动退回确定性 Worker。
+10. 支持受审批约束的本地补丁工作流和离线受限进化。
 
 ## 2. 用户流程
 
@@ -60,7 +55,24 @@
     }
   ],
   "languages": ["python", "typescript", "javascript", "go", "java", "rust"],
-  "exclude": ["node_modules", "dist", "target", ".venv"]
+  "exclude": ["node_modules", "dist", "target", ".venv"],
+  "doc_paths": ["docs", "adr"],
+  "max_workers": 4,
+  "budgets": {"max_seconds": 300.0, "max_calls": 50, "max_tokens": 50000},
+  "contracts": [
+    {
+      "name": "OrderService.create",
+      "provider_repo": "order-core",
+      "version": "v1",
+      "consumers": ["payment-core", "risk-core"]
+    }
+  ],
+  "llm": {
+    "provider": "none",
+    "base_url_env": "ATLAS_LLM_BASE_URL",
+    "api_key_env": "ATLAS_LLM_API_KEY",
+    "model_env": "ATLAS_LLM_MODEL"
+  }
 }
 ```
 
@@ -80,6 +92,14 @@
 | `memory_reviews` | 外部审查者对记忆的复核决策 |
 | `scope_tokens` | 短期 token、路径边界、状态、过期时间 |
 | `audit_events` | 工具调用、scope 创建、记忆漂移等审计事件 |
+| `agent_runs` | 四层 Agent 运行、预算用量、结果与失败记录 |
+| `approvals` | 中/高风险操作审批请求与人工决策 |
+| `patches` | 补丁文本、状态、审批关联和应用记录 |
+| `contracts` | 显式架构契约、provider、version、consumers |
+| `architecture_docs` | 架构文档、ADR、API/database/contract 知识源 |
+| `semantic_generations` | 语义记忆生成任务和 provider |
+| `strategy_rules` | 从审计蒸馏出的路由策略与效用分数 |
+| `evolution_variants` | 离线进化变体、冻结评分与状态 |
 
 ### 状态
 
@@ -90,6 +110,10 @@
 | 诊断 | `warning` / `error` |
 | 记忆 | `valid` / `stale` / `invalid` |
 | scope token | `active` / `used` / `expired` / `revoked` |
+| Agent run | `running` / `completed` / `failed` |
+| 审批 | `pending` / `approved` / `rejected` |
+| 补丁 | `pending` / `approved` / `rejected` / `applied` |
+| 进化变体 | `candidate` / `accepted` / `rejected` |
 
 ## 4. 关键交互
 
@@ -250,6 +274,29 @@ Phase 4 将上下文包构建做成固定边界的服务端能力：
 5. developer 包返回 scope 候选，但不自动创建 scope token。
 6. 任一层查询的文件/仓库不存在时返回显式错误，不返回空假成功。
 
+### 四层 Agent
+
+`atlas agents` 运行完整下行链路：
+
+```
+question
+  -> Router
+  -> architect agent
+  -> system agent
+  -> module agent
+  -> scoped developer agent
+  -> upward convergence
+```
+
+1. Architect agent 只看全局 repo/subsystem、cross-repo edge 和契约。
+2. System agent 只看目标 repo 的文件/符号统计与部署边界。
+3. Module agent 只看目标文件的符号、import、入向引用。
+4. Developer agent 通过编排器创建服务端 scope token，读取物理文件片段。
+5. `read_scoped_file` 先校验 scope，再读取文件；读取事件写入审计。
+6. 可通过环境变量接入 OpenAI-compatible LLM；无配置时使用确定性 claim。
+7. Kernel Budget 限制时间、调用次数和 token 数。
+8. 每个 finding 通过 kernel evidence verifier；`private_score` 只返回分数。
+
 ### 上行回溯汇聚
 
 `atlas_converge` 接收多个角色 Worker 的结构化发现，按上行顺序汇聚：
@@ -273,9 +320,64 @@ Phase 4 将上下文包构建做成固定边界的服务端能力：
 
 输出固定包含 ordered findings、role summary、missing layers、cross-repo evidence、可选 impact propagation、answer sections 和 warnings。汇聚器不生成代码，不自动提交修改，也不把缺少证据的 finding 当作可执行结论。
 
+### 语义记忆
+
+`atlas memory generate` 生成 file / repo / subsystem 三层语义记忆：
+
+1. 默认从 AST、symbols、imports 生成确定性 claim。
+2. 配置 LLM 后可生成自然语言摘要；LLM 失败自动退回确定性结果。
+3. 每条记忆写入 `semantic_generations`，记录 provider。
+4. 证据绑定索引文件和行号。
+5. `atlas memory auto-review` 对 stale 记忆读取证据文件，按 claim 关键词复核并写入 `memory_reviews`。
+6. `atlas memory lessons` 从 Git revert 提交提取行为记忆。
+7. utility score 可被检索使用和复核调整。
+
+### 架构契约与知识源
+
+`atlas architecture` 管理显式架构知识：
+
+1. `sync` 从 config.contracts 同步契约。
+2. `contracts` 列出 provider、version、consumers 和状态。
+3. `impact` 将契约名映射到引用图，输出受影响 repo。
+4. `docs-index` 索引 Markdown/JSON/YAML 架构文档，按 architecture/api/database/contract/adr 分类。
+5. `docs` 返回标题、摘要、hash 和 indexed_at。
+
+### Kernel
+
+Kernel 是不可绕过的执行边界：
+
+| 规则 | 实现 |
+| --- | --- |
+| 资源熔断 | `Budget` 限制 elapsed seconds、calls、tokens |
+| 高危拦截 | `delete_file`、`external_send`、`permission_change`、`payment`、`runtime_self_modify`、`apply_patch` 必须审批 |
+| 中风险 | `propose_patch`、`create_pr`、`memory_generate` 需要审批或记录 |
+| 可验证性 | finding 的 evidence 文件必须存在于索引 |
+| 私有评分 | `private_score` 只返回分数，不暴露公式 |
+| 审计 | 请求、决策、补丁应用、Agent 运行写入 audit |
+
+### 变更工作流
+
+`atlas patch` 提供最小安全闭环：
+
+1. `propose` 要求精确 old_text / new_text，生成 unified diff，并创建 high-risk approval。
+2. `decide` 由人类 approver 接受或拒绝。
+3. `apply` 只接受 approved patch，并验证目标 old_text 仍唯一。
+4. 可选 `--test-command` 在本地沙盒命令中执行测试；失败则不写文件。
+5. 应用写入 `patch.applied` 审计。
+
+### 离线进化
+
+`atlas evolution` 只在离线边界运行：
+
+1. `distill` 从 router 审计生成 strategy rules 和 utility score。
+2. `create` 只允许 router_terms、strategy_rule、context_template 三类变体。
+3. `evaluate` 使用冻结 Router cases；变体不直接修改运行时规则。
+4. accepted 表示可由人类提升到配置，不是立即自动替换。
+5. 所有创建和评估写入审计。
+
 ### MCP
 
-Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`tools/call`。工具返回结构化摘要，限制输出条数，避免一次性返回大段代码。
+Server 支持 JSON-RPC over stdio（`atlas serve`）和 HTTP（`atlas serve-http`），均支持 `initialize`、`tools/list`、`tools/call`。工具返回结构化摘要，限制输出条数，避免一次性返回大段代码。HTTP 可用 `ATLAS_HTTP_TOKEN` 设置 Bearer token。
 
 ### Scope
 
@@ -299,7 +401,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 1. 配置不存在或非法时，`init` / `index` / `serve` 立即失败并给出明确错误。
 2. 解析失败的文件记录为无符号，不阻断整体索引。
 3. 解析失败和无法解码的文件写入 `index_diagnostics`，并在 health 中返回计数。
-4. 旧数据库在连接时自动迁移缺失列、`memory_reviews` 和导出符号变更历史；迁移只增加列、表和索引，不删除用户数据。
+4. 旧数据库在连接时自动迁移缺失列和新表；迁移只增加列、表和索引，不删除用户数据。
 5. SQLite 使用 WAL，限制并发写冲突。
 6. MCP 查询缺少参数时返回协议级错误。
 7. scope token 不存在、过期、已撤销或范围不匹配时拒绝查询。
@@ -309,15 +411,18 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 11. developer 上下文包只提供结构和引用边界；访问完整源码仍必须通过外部工具和 scope token。
 12. 汇聚输入中的 evidence 文件必须在索引中存在；不存在时返回显式错误。
 13. Pipeline worker 只产生结构性发现；缺少索引候选时输出 warning，不编造证据。
+14. Agent Budget 超限时终止运行并记录 failed。
+15. HTTP Server 默认绑定 127.0.0.1；设置 `ATLAS_HTTP_TOKEN` 后未认证请求返回 401。
 
 ## 6. 安全与权限
 
-1. 索引是只读操作，不修改目标项目文件。
-2. 数据库和 scope token 保存在项目 `.atlas/` 目录内。
-3. 高危操作当前不存在。
+1. 索引和查询默认只读。
+2. 数据库、scope token 和审批状态保存在项目 `.atlas/` 目录内。
+3. 代码修改必须经过 propose → human approve → apply，并且 apply 只接受 approved 状态。
 4. scope token 是服务端校验对象，不能由客户端修改路径范围。
-5. 记忆复核是唯一的运行时记忆状态写入入口，决策来源和原因会被审计。
-6. Router 评估、导出符号变更、Pipeline 运行和 scope 使用事件写入审计表。
+5. Developer Agent 读取物理文件必须携带服务端 scope token。
+6. LLM API key 只从环境变量读取，不写入 config。
+7. 记忆复核、审批、补丁应用、Agent 运行和 Router 评估写入审计。
 
 ## 7. 验收清单
 
@@ -385,13 +490,29 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 - [x] `atlas run` 串联 Router / context / worker / convergence。
 - [x] `atlas daemon` 支持前台轮询增量索引。
 
+### Phase 5 Kernel / Agent / Memory / Evolution
+
+- [x] Python / TS / JS / Go / Java / Rust 基础 call edge 抽取。
+- [x] 并行文件解析。
+- [x] Kernel Budget 时间 / 调用 / token 熔断。
+- [x] 中高风险审批。
+- [x] finding evidence verifier 和 private score。
+- [x] 四层 Agent 与 scoped developer file read。
+- [x] OpenAI-compatible LLM Provider。
+- [x] 语义记忆生成与 stale 自动复核。
+- [x] Git revert 教训提取。
+- [x] 架构契约同步与契约影响。
+- [x] 架构文档 / ADR 索引。
+- [x] approved patch / sandbox test workflow。
+- [x] 策略蒸馏与离线变体评分。
+- [x] HTTP JSON-RPC Server。
+
 ## 8. 后续演进
 
-1. 增加更多语言解析器：Go、Java、Rust。
-2. 引入 tree-sitter 或稳定语言服务作为后续索引后端。
-3. 为热点文件增加按需语义摘要。
-4. 将确定性 Worker 替换为受控 LLM Worker。
-5. 增加文件系统监听与长驻守护进程。
-6. 将 `create_scope` 从通用 MCP 工具迁出，改为编排器专用端点。
-7. 增加冻结验证集，用于评估索引准确率和路由质量。
+1. 用 tree-sitter 或语言服务替换基础正则解析器。
+2. 增加 embedding / hybrid search。
+3. 扩展 PR / Git remote 集成。
+4. 将文件监听从轮询升级为 OS event。
+5. 为 LLM Worker 建立真实项目评估集。
+6. 将 accepted variants 的人类提升流程自动化。
 

@@ -19,6 +19,12 @@ def _warnings(report: dict) -> list[str]:
         warnings.append(f"{unresolved + ambiguous} references are ambiguous or unresolved")
     if report.get("memory_by_status", {}).get("stale"):
         warnings.append("stale memories require review")
+    if report.get("pending_approval_count"):
+        warnings.append("kernel approvals require review")
+    if report.get("pending_patch_count"):
+        warnings.append("proposed patches require review")
+    if report.get("failed_agent_run_count"):
+        warnings.append("agent runs failed; inspect audit events")
     router_validation = report.get("router_validation")
     if not router_validation:
         warnings.append("router validation has not been run")
@@ -40,6 +46,14 @@ def health_report(report: dict) -> str:
         f"- Memories: `{report['memory_count']}`",
         f"- Diagnostics: `{report['diagnostic_count']}`",
         f"- Exported symbol changes: `{report['exported_symbol_change_count']}`",
+        f"- Contracts: `{report['contract_count']}`",
+        f"- Architecture docs: `{report['architecture_doc_count']}`",
+        f"- Semantic memories: `{report['semantic_memory_count']}`",
+        f"- Pending approvals: `{report['pending_approval_count']}`",
+        f"- Pending patches: `{report['pending_patch_count']}`",
+        f"- Agent runs: `{report['agent_run_count']}`",
+        f"- Strategy rules: `{report['strategy_rule_count']}`",
+        f"- Accepted variants: `{report['accepted_variant_count']}`",
         "",
         "## Language coverage",
         "",
@@ -77,6 +91,29 @@ def health_report(report: dict) -> str:
         )
     else:
         lines.append("- none")
+
+    lines.extend(["", "## Memory layers", ""])
+    if report.get("memory_by_layer"):
+        lines.extend(
+            f"- `{layer}`: `{count}`"
+            for layer, count in sorted(report["memory_by_layer"].items())
+        )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Kernel and evolution", ""])
+    lines.extend(
+        [
+            f"- Contracts: `{report['contract_count']}`",
+            f"- Architecture docs: `{report['architecture_doc_count']}`",
+            f"- Pending approvals: `{report['pending_approval_count']}`",
+            f"- Pending patches: `{report['pending_patch_count']}`",
+            f"- Agent runs: `{report['agent_run_count']}`",
+            f"- Failed agent runs: `{report['failed_agent_run_count']}`",
+            f"- Strategy rules: `{report['strategy_rule_count']}`",
+            f"- Accepted variants: `{report['accepted_variant_count']}`",
+        ]
+    )
 
     lines.extend(["", "## Index diagnostics", ""])
     if report.get("diagnostics"):

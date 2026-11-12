@@ -16,6 +16,12 @@ from .router import evaluate_router
 from .propagation import export_propagation
 from .pipeline import run_pipeline
 from .daemon import run_daemon
+from .agents import run_layered_agents
+from .memory import generate_semantic_memories, auto_review_stale_memories, extract_revert_lessons
+from .architecture import sync_contracts, list_contracts, contract_impact, ingest_architecture_docs, list_architecture_docs
+from .kernel import list_approvals, decide_approval
+from .changes import propose_patch, decide_patch, apply_patch, list_patches
+from .evolution import distill_strategy_rules, create_variant, evaluate_variant, list_variants
 
 
 def print_json(value: dict | list) -> None:
@@ -136,6 +142,164 @@ def command_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_agents(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        result = run_layered_agents(
+            conn,
+            config,
+            args.question,
+            use_llm=not args.no_llm,
+            min_confidence=args.min_confidence,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_memory(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.memory_command == "generate":
+            result = generate_semantic_memories(conn, config, scope=args.scope, use_llm=not args.no_llm)
+        elif args.memory_command == "auto-review":
+            result = auto_review_stale_memories(conn, limit=args.limit)
+        elif args.memory_command == "lessons":
+            result = extract_revert_lessons(conn, config, limit=args.limit)
+        else:
+            raise ValueError("unknown memory action")
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_architecture(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.architecture_command == "sync":
+            result = sync_contracts(conn, config)
+        elif args.architecture_command == "contracts":
+            result = list_contracts(conn, limit=args.limit)
+        elif args.architecture_command == "impact":
+            result = contract_impact(
+                conn,
+                args.name,
+                limit=args.limit,
+                min_confidence=args.min_confidence,
+            )
+        elif args.architecture_command == "docs-index":
+            result = ingest_architecture_docs(conn, config)
+        elif args.architecture_command == "docs":
+            result = list_architecture_docs(conn, kind=args.kind, limit=args.limit)
+        else:
+            raise ValueError("unknown architecture action")
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_approvals(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.approvals_command == "list":
+            result = list_approvals(conn, status=args.status, limit=args.limit)
+        elif args.approvals_command == "decide":
+            result = decide_approval(
+                conn,
+                args.approval_id,
+                args.decision,
+                approver=args.approver,
+                reason=args.reason,
+            )
+        else:
+            raise ValueError("unknown approvals action")
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_patch(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.patch_command == "propose":
+            result = propose_patch(
+                conn,
+                config,
+                args.file,
+                old_text=args.old_text,
+                new_text=args.new_text,
+                title=args.title,
+                created_by=args.created_by,
+            )
+        elif args.patch_command == "decide":
+            result = decide_patch(
+                conn,
+                args.patch_key,
+                args.decision,
+                approver=args.approver,
+                reason=args.reason,
+            )
+        elif args.patch_command == "apply":
+            result = apply_patch(
+                conn,
+                args.patch_key,
+                applied_by=args.applied_by,
+                test_command=args.test_command,
+            )
+        elif args.patch_command == "list":
+            result = list_patches(conn, status=args.status, limit=args.limit)
+        else:
+            raise ValueError("unknown patch action")
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_evolution(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.evolution_command == "distill":
+            result = distill_strategy_rules(conn, limit=args.limit)
+        elif args.evolution_command == "create":
+            payload = json.loads(args.payload)
+            result = create_variant(
+                conn,
+                object_type=args.object_type,
+                name=args.name,
+                payload=payload,
+                parent_key=args.parent_key,
+            )
+        elif args.evolution_command == "evaluate":
+            result = evaluate_variant(conn, config, args.variant_key, record=not args.no_record)
+        elif args.evolution_command == "list":
+            result = list_variants(conn, status=args.status, limit=args.limit)
+        else:
+            raise ValueError("unknown evolution action")
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_serve_http(args: argparse.Namespace) -> int:
+    from .server import run_http_server
+
+    run_http_server(args.project_root, args.host, args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="atlas", description="Layered project knowledge system")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -213,6 +377,123 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = commands.add_parser("serve", help="run the MCP stdio server")
     serve_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
     serve_parser.set_defaults(handler=command_serve)
+
+    agents_parser = commands.add_parser("agents", help="run four-layer role agents")
+    agents_parser.add_argument("project_root", nargs="?", default=".")
+    agents_parser.add_argument("question")
+    agents_parser.add_argument("--no-llm", action="store_true")
+    agents_parser.add_argument("--min-confidence", type=float, default=0.65)
+    agents_parser.add_argument("--limit", type=int, default=50)
+    agents_parser.set_defaults(handler=command_agents)
+
+    memory_parser = commands.add_parser("memory", help="semantic memory operations")
+    memory_sub = memory_parser.add_subparsers(dest="memory_command", required=True)
+    memory_generate = memory_sub.add_parser("generate", help="generate semantic memories")
+    memory_generate.add_argument("project_root", nargs="?", default=".")
+    memory_generate.add_argument("--scope")
+    memory_generate.add_argument("--no-llm", action="store_true")
+    memory_generate.set_defaults(handler=command_memory)
+    memory_review = memory_sub.add_parser("auto-review", help="review stale memories")
+    memory_review.add_argument("project_root", nargs="?", default=".")
+    memory_review.add_argument("--limit", type=int, default=100)
+    memory_review.set_defaults(handler=command_memory)
+    memory_lessons = memory_sub.add_parser("lessons", help="extract revert lessons")
+    memory_lessons.add_argument("project_root", nargs="?", default=".")
+    memory_lessons.add_argument("--limit", type=int, default=20)
+    memory_lessons.set_defaults(handler=command_memory)
+
+    architecture_parser = commands.add_parser("architecture", help="contracts and architecture docs")
+    architecture_sub = architecture_parser.add_subparsers(dest="architecture_command", required=True)
+    for name, extra in (
+        ("sync", {}),
+        ("contracts", {"limit": 100}),
+        ("impact", {"limit": 100, "min_confidence": 0.65}),
+        ("docs-index", {}),
+        ("docs", {"limit": 100, "kind": None}),
+    ):
+        command = architecture_sub.add_parser(name)
+        command.add_argument("project_root", nargs="?", default=".")
+        if "limit" in extra:
+            command.add_argument("--limit", type=int, default=extra["limit"])
+        if "min_confidence" in extra:
+            command.add_argument("--min-confidence", type=float, default=extra["min_confidence"])
+        if "kind" in extra:
+            command.add_argument("--kind")
+        command.set_defaults(handler=command_architecture)
+
+    approvals_parser = commands.add_parser("approvals", help="kernel approvals")
+    approvals_sub = approvals_parser.add_subparsers(dest="approvals_command", required=True)
+    approvals_list = approvals_sub.add_parser("list")
+    approvals_list.add_argument("project_root", nargs="?", default=".")
+    approvals_list.add_argument("--status")
+    approvals_list.add_argument("--limit", type=int, default=50)
+    approvals_list.set_defaults(handler=command_approvals)
+    approvals_decide = approvals_sub.add_parser("decide")
+    approvals_decide.add_argument("project_root", nargs="?", default=".")
+    approvals_decide.add_argument("approval_id", type=int)
+    approvals_decide.add_argument("decision", choices=("approved", "rejected"))
+    approvals_decide.add_argument("--approver", required=True)
+    approvals_decide.add_argument("--reason", required=True)
+    approvals_decide.set_defaults(handler=command_approvals)
+
+    patch_parser = commands.add_parser("patch", help="approved patch workflow")
+    patch_sub = patch_parser.add_subparsers(dest="patch_command", required=True)
+    patch_propose = patch_sub.add_parser("propose")
+    patch_propose.add_argument("project_root", nargs="?", default=".")
+    patch_propose.add_argument("--file", required=True)
+    patch_propose.add_argument("--old-text", required=True)
+    patch_propose.add_argument("--new-text", required=True)
+    patch_propose.add_argument("--title", required=True)
+    patch_propose.add_argument("--created-by", required=True)
+    patch_propose.set_defaults(handler=command_patch)
+    patch_decide = patch_sub.add_parser("decide")
+    patch_decide.add_argument("project_root", nargs="?", default=".")
+    patch_decide.add_argument("patch_key")
+    patch_decide.add_argument("decision", choices=("approved", "rejected"))
+    patch_decide.add_argument("--approver", required=True)
+    patch_decide.add_argument("--reason", required=True)
+    patch_decide.set_defaults(handler=command_patch)
+    patch_apply = patch_sub.add_parser("apply")
+    patch_apply.add_argument("project_root", nargs="?", default=".")
+    patch_apply.add_argument("patch_key")
+    patch_apply.add_argument("--applied-by", required=True)
+    patch_apply.add_argument("--test-command")
+    patch_apply.set_defaults(handler=command_patch)
+    patch_list = patch_sub.add_parser("list")
+    patch_list.add_argument("project_root", nargs="?", default=".")
+    patch_list.add_argument("--status")
+    patch_list.add_argument("--limit", type=int, default=50)
+    patch_list.set_defaults(handler=command_patch)
+
+    evolution_parser = commands.add_parser("evolution", help="offline bounded evolution")
+    evolution_sub = evolution_parser.add_subparsers(dest="evolution_command", required=True)
+    evolution_distill = evolution_sub.add_parser("distill")
+    evolution_distill.add_argument("project_root", nargs="?", default=".")
+    evolution_distill.add_argument("--limit", type=int, default=100)
+    evolution_distill.set_defaults(handler=command_evolution)
+    evolution_create = evolution_sub.add_parser("create")
+    evolution_create.add_argument("project_root", nargs="?", default=".")
+    evolution_create.add_argument("--object-type", required=True, choices=("router_terms", "strategy_rule", "context_template"))
+    evolution_create.add_argument("--name", required=True)
+    evolution_create.add_argument("--payload", required=True, help="JSON payload")
+    evolution_create.add_argument("--parent-key")
+    evolution_create.set_defaults(handler=command_evolution)
+    evolution_evaluate = evolution_sub.add_parser("evaluate")
+    evolution_evaluate.add_argument("project_root", nargs="?", default=".")
+    evolution_evaluate.add_argument("variant_key")
+    evolution_evaluate.add_argument("--no-record", action="store_true")
+    evolution_evaluate.set_defaults(handler=command_evolution)
+    evolution_list = evolution_sub.add_parser("list")
+    evolution_list.add_argument("project_root", nargs="?", default=".")
+    evolution_list.add_argument("--status")
+    evolution_list.add_argument("--limit", type=int, default=50)
+    evolution_list.set_defaults(handler=command_evolution)
+
+    http_parser = commands.add_parser("serve-http", help="run HTTP JSON-RPC server")
+    http_parser.add_argument("project_root", nargs="?", default=".")
+    http_parser.add_argument("--host", default="127.0.0.1")
+    http_parser.add_argument("--port", type=int, default=8787)
+    http_parser.set_defaults(handler=command_serve_http)
 
     return parser
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import pathlib
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 
 ATLAS_DIR = ".atlas"
@@ -23,6 +24,20 @@ class ProjectConfig:
     subsystems: tuple[dict, ...]
     languages: tuple[str, ...]
     exclude: tuple[str, ...]
+    contracts: tuple[dict, ...] = ()
+    doc_paths: tuple[str, ...] = ("docs",)
+    max_workers: int = 4
+    budgets: dict = field(default_factory=lambda: {
+        "max_seconds": 300.0,
+        "max_calls": 50,
+        "max_tokens": 50000,
+    })
+    llm: dict = field(default_factory=lambda: {
+        "provider": "none",
+        "base_url_env": "ATLAS_LLM_BASE_URL",
+        "api_key_env": "ATLAS_LLM_API_KEY",
+        "model_env": "ATLAS_LLM_MODEL",
+    })
 
     @property
     def atlas_dir(self) -> pathlib.Path:
@@ -34,6 +49,11 @@ class ProjectConfig:
 
 
 def default_config(project_root: pathlib.Path) -> dict:
+    budgets = {
+        "max_seconds": 300.0,
+        "max_calls": 50,
+        "max_tokens": 50000,
+    }
     return {
         "project": project_root.name,
         "subsystems": [
@@ -48,6 +68,15 @@ def default_config(project_root: pathlib.Path) -> dict:
             "venv",
             "__pycache__",
         ],
+        "doc_paths": ["docs", "adr"],
+        "max_workers": 4,
+        "budgets": budgets,
+        "llm": {
+            "provider": "none",
+            "base_url_env": "ATLAS_LLM_BASE_URL",
+            "api_key_env": "ATLAS_LLM_API_KEY",
+            "model_env": "ATLAS_LLM_MODEL",
+        },
     }
 
 
@@ -109,11 +138,37 @@ def load_config(project_root: str | pathlib.Path) -> ProjectConfig:
         normalized_subsystems.append({"name": name.strip(), "repos": list(repos)})
 
     normalized_languages = tuple(str(item).lower() for item in languages)
+    contracts = raw.get("contracts", [])
+    if not isinstance(contracts, list) or not all(isinstance(item, dict) for item in contracts):
+        raise ConfigError("config.contracts must be a list of objects")
+    doc_paths = raw.get("doc_paths", ["docs"])
+    if not isinstance(doc_paths, list) or not all(isinstance(item, str) for item in doc_paths):
+        raise ConfigError("config.doc_paths must be a list of strings")
+    max_workers = raw.get("max_workers", 4)
+    if not isinstance(max_workers, int) or not 1 <= max_workers <= 64:
+        raise ConfigError("config.max_workers must be an integer between 1 and 64")
+    default_budgets = default_config(root)["budgets"]
+    budgets = raw.get("budgets", default_budgets)
+    if not isinstance(budgets, dict):
+        raise ConfigError("config.budgets must be an object")
+    for key in ("max_seconds", "max_calls", "max_tokens"):
+        value = budgets.get(key, default_budgets[key])
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"config.budgets.{key} must be a positive number")
+    default_llm = default_config(root)["llm"]
+    llm = raw.get("llm", default_llm)
+    if not isinstance(llm, dict):
+        raise ConfigError("config.llm must be an object")
     return ProjectConfig(
         project_root=root,
         project=project.strip(),
         subsystems=tuple(normalized_subsystems),
         languages=normalized_languages,
         exclude=tuple(exclude),
+        contracts=tuple(contracts),
+        doc_paths=tuple(doc_paths),
+        max_workers=max_workers,
+        budgets=budgets,
+        llm=llm,
     )
 

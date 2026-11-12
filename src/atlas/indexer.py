@@ -8,6 +8,7 @@ import pathlib
 import re
 import sqlite3
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import replace
 
@@ -157,6 +158,22 @@ def extract_python(path: pathlib.Path, module_name: str) -> tuple[FileRecord, by
                         target = f"{base}.{alias.name}" if base else alias.name
                         imports.append({"target": target, "line": line, "kind": "import"})
                 continue
+            if isinstance(child, ast.Call):
+                function = child.func
+                if isinstance(function, ast.Name):
+                    target = function.id
+                elif isinstance(function, ast.Attribute):
+                    target = function.attr
+                else:
+                    target = None
+                if target:
+                    imports.append({
+                        "target": target,
+                        "line": getattr(child, "lineno", 1),
+                        "kind": "call",
+                    })
+                walk(child, parent)
+                continue
             if isinstance(child, ast.ClassDef):
                 add_symbol(child, child.name, "class", parent, parent is None)
                 walk(child, f"{parent}.{child.name}" if parent else f"{module_name}.{child.name}")
@@ -184,6 +201,11 @@ TS_FUNCTION_RE = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?func
 TS_ASSIGN_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function|[\w$]+(?:\s*=>)|\()", re.MULTILINE)
 TS_EXPORT_RE = re.compile(r"^\s*export\s+(?:type|interface|enum)\s+([A-Za-z_$][\w$]*)", re.MULTILINE)
 TS_IMPORT_RE = re.compile(r"^\s*import\s+(?:[\w$*{},\s]+?\s+from\s+)?['\"]([^'\"]+)['\"]", re.MULTILINE)
+TS_CALL_RE = re.compile(r"(?<!\w)([A-Za-z_$][\w$]*)\s*\(", re.MULTILINE)
+TS_CALL_EXCLUDE = {
+    "if", "for", "while", "switch", "catch", "function", "return", "new",
+    "class", "constructor", "super", "typeof",
+}
 
 
 def extract_ts_js(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
@@ -233,6 +255,15 @@ def extract_ts_js(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byt
                 exported=match.group(0).lstrip().startswith("export"),
             )
         )
+    for match in TS_CALL_RE.finditer(text):
+        target = match.group(1)
+        if target in TS_CALL_EXCLUDE:
+            continue
+        imports.append({
+            "target": target,
+            "line": text.count("\n", 0, match.start()) + 1,
+            "kind": "call",
+        })
     for regex, kind in (
         (TS_ASSIGN_RE, "variable"),
         (TS_EXPORT_RE, "type"),
@@ -271,6 +302,7 @@ GO_METHOD_RE = re.compile(
 )
 GO_FUNCTION_RE = re.compile(r"^\s*func\s+([A-Za-z_][\w]*)\s*\(", re.MULTILINE)
 GO_VALUE_RE = re.compile(r"^\s*(?:var|const)\s+([A-Za-z_][\w]*)\s*(?:=|\b)", re.MULTILINE)
+GO_CALL_RE = re.compile(r"(?<!func\s)(?<!\w)([A-Za-z_][\w.]*)\s*\(", re.MULTILINE)
 
 
 def extract_go(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
@@ -352,6 +384,15 @@ def extract_go(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]
                 parent_qualified=parent,
             )
         )
+    for match in GO_CALL_RE.finditer(text):
+        target = match.group(1)
+        if target in {"if", "for", "switch", "func", "make", "new"}:
+            continue
+        imports.append({
+            "target": target,
+            "line": text.count("\n", 0, match.start()) + 1,
+            "kind": "call",
+        })
 
     return FileRecord(
         path=path.as_posix(),
@@ -376,6 +417,7 @@ JAVA_METHOD_RE = re.compile(
     r"(?:<[^>]+>\s*)?[\w<>\[\], .?]+\s+([A-Za-z_$][\w$]*)\s*\(",
     re.MULTILINE,
 )
+JAVA_CALL_RE = re.compile(r"(?<!\w)([A-Za-z_$][\w$]*)\s*\(", re.MULTILINE)
 
 
 def extract_java(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
@@ -441,6 +483,15 @@ def extract_java(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byte
                 parent_qualified=parent,
             )
         )
+    for match in JAVA_CALL_RE.finditer(text):
+        target = match.group(1)
+        if target in {"if", "for", "while", "switch", "catch", "return", "new", "synchronized"}:
+            continue
+        imports.append({
+            "target": target,
+            "line": text.count("\n", 0, match.start()) + 1,
+            "kind": "call",
+        })
 
     return FileRecord(
         path=path.as_posix(),
@@ -469,6 +520,7 @@ RUST_IMPL_RE = re.compile(
     r"^\s*impl(?:<[^>]*>)?\s+(?:[\w:]+\s+for\s+)?([A-Za-z_][\w:]*)",
     re.MULTILINE,
 )
+RUST_CALL_RE = re.compile(r"(?<!fn\s)(?<!\w)([A-Za-z_][\w:]*)\s*\(", re.MULTILINE)
 
 
 def extract_rust(path: pathlib.Path, module_name: str) -> tuple[FileRecord, bytes]:
@@ -534,6 +586,15 @@ def extract_rust(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byte
                 parent_qualified=parent,
             )
         )
+    for match in RUST_CALL_RE.finditer(text):
+        target = match.group(1)
+        if target in {"if", "match", "while", "for", "Some", "Ok", "Err"}:
+            continue
+        imports.append({
+            "target": target,
+            "line": text.count("\n", 0, match.start()) + 1,
+            "kind": "call",
+        })
 
     return FileRecord(
         path=path.as_posix(),
@@ -570,14 +631,17 @@ def scan_file(path: pathlib.Path, display_path: pathlib.Path | None = None) -> F
 
 def scan_repo(repo_dir: pathlib.Path, project_config: ProjectConfig) -> list[FileRecord]:
     records: list[FileRecord] = []
-    for path in sorted(repo_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if is_excluded(path, project_config):
-            continue
-        record = scan_file(path, path.relative_to(repo_dir))
-        if record is not None:
-            records.append(record)
+    paths = [
+        path for path in sorted(repo_dir.rglob("*"))
+        if path.is_file() and not is_excluded(path, project_config)
+    ]
+    if not paths:
+        return records
+    max_workers = max(1, min(int(project_config.max_workers), len(paths)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for record in executor.map(lambda path: scan_file(path, path.relative_to(repo_dir)), paths):
+            if record is not None:
+                records.append(record)
     return records
 
 
@@ -936,6 +1000,7 @@ def index_project(
         "files_unchanged": 0,
         "symbols": 0,
         "imports": 0,
+        "calls": 0,
         "mode": "full",
         "git_candidates": 0,
         "workspace_candidates": 0,
@@ -1030,7 +1095,8 @@ def index_project(
                     stable_path = record.path
                     stats["files_scanned"] += 1
                     stats["symbols"] += len(record.symbols)
-                    stats["imports"] += len(record.imports)
+                    stats["imports"] += sum(1 for item in record.imports if item["kind"] == "import")
+                    stats["calls"] += sum(1 for item in record.imports if item["kind"] == "call")
                     if not _file_changed(conn, repo_id, stable_path, record):
                         stats["files_unchanged"] += 1
                         continue

@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -104,6 +104,111 @@ CREATE TABLE IF NOT EXISTS exported_symbol_changes (
   indexed_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY,
+  run_key TEXT NOT NULL UNIQUE,
+  question TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  budget_json TEXT NOT NULL,
+  usage_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id INTEGER PRIMARY KEY,
+  approval_key TEXT NOT NULL UNIQUE,
+  action_type TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by TEXT NOT NULL,
+  approver TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS patches (
+  id INTEGER PRIMARY KEY,
+  patch_key TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  old_text TEXT NOT NULL,
+  new_text TEXT NOT NULL,
+  diff_text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  approval_id INTEGER REFERENCES approvals(id),
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  applied_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS contracts (
+  id INTEGER PRIMARY KEY,
+  contract_key TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  provider_repo TEXT NOT NULL,
+  provider_subsystem TEXT NOT NULL,
+  version TEXT NOT NULL DEFAULT 'v1',
+  status TEXT NOT NULL DEFAULT 'active',
+  consumers_json TEXT NOT NULL DEFAULT '[]',
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS architecture_docs (
+  id INTEGER PRIMARY KEY,
+  doc_key TEXT NOT NULL UNIQUE,
+  path TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  indexed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS semantic_generations (
+  id INTEGER PRIMARY KEY,
+  generation_key TEXT NOT NULL UNIQUE,
+  scope_type TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  memory_key TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS strategy_rules (
+  id INTEGER PRIMARY KEY,
+  rule_key TEXT NOT NULL UNIQUE,
+  pattern TEXT NOT NULL,
+  intent TEXT NOT NULL,
+  role TEXT NOT NULL,
+  utility_score REAL NOT NULL DEFAULT 0.5,
+  hits INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT 'distilled',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evolution_variants (
+  id INTEGER PRIMARY KEY,
+  variant_key TEXT NOT NULL UNIQUE,
+  object_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  score REAL,
+  status TEXT NOT NULL DEFAULT 'candidate',
+  parent_key TEXT,
+  created_at TEXT NOT NULL,
+  evaluated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS scope_tokens (
   id INTEGER PRIMARY KEY,
   token TEXT NOT NULL UNIQUE,
@@ -153,6 +258,13 @@ CREATE INDEX IF NOT EXISTS idx_export_changes_type ON exported_symbol_changes(ch
 CREATE INDEX IF NOT EXISTS idx_scope_token ON scope_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_diagnostics_repo ON index_diagnostics(repo_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_patches_status ON patches(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_contracts_name ON contracts(name);
+CREATE INDEX IF NOT EXISTS idx_architecture_docs_kind ON architecture_docs(kind, path);
+CREATE INDEX IF NOT EXISTS idx_strategy_rules_pattern ON strategy_rules(pattern);
+CREATE INDEX IF NOT EXISTS idx_evolution_status ON evolution_variants(status, score);
 """
 
 
@@ -165,6 +277,107 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agent_runs (
+          id INTEGER PRIMARY KEY,
+          run_key TEXT NOT NULL UNIQUE,
+          question TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running',
+          budget_json TEXT NOT NULL,
+          usage_json TEXT NOT NULL DEFAULT '{}',
+          result_json TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS approvals (
+          id INTEGER PRIMARY KEY,
+          approval_key TEXT NOT NULL UNIQUE,
+          action_type TEXT NOT NULL,
+          risk TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          requested_by TEXT NOT NULL,
+          approver TEXT,
+          reason TEXT,
+          created_at TEXT NOT NULL,
+          decided_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS patches (
+          id INTEGER PRIMARY KEY,
+          patch_key TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          old_text TEXT NOT NULL,
+          new_text TEXT NOT NULL,
+          diff_text TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          approval_id INTEGER REFERENCES approvals(id),
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          applied_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS contracts (
+          id INTEGER PRIMARY KEY,
+          contract_key TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          provider_repo TEXT NOT NULL,
+          provider_subsystem TEXT NOT NULL,
+          version TEXT NOT NULL DEFAULT 'v1',
+          status TEXT NOT NULL DEFAULT 'active',
+          consumers_json TEXT NOT NULL DEFAULT '[]',
+          notes TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS architecture_docs (
+          id INTEGER PRIMARY KEY,
+          doc_key TEXT NOT NULL UNIQUE,
+          path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          indexed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS semantic_generations (
+          id INTEGER PRIMARY KEY,
+          generation_key TEXT NOT NULL UNIQUE,
+          scope_type TEXT NOT NULL,
+          scope_key TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          status TEXT NOT NULL,
+          memory_key TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS strategy_rules (
+          id INTEGER PRIMARY KEY,
+          rule_key TEXT NOT NULL UNIQUE,
+          pattern TEXT NOT NULL,
+          intent TEXT NOT NULL,
+          role TEXT NOT NULL,
+          utility_score REAL NOT NULL DEFAULT 0.5,
+          hits INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT 'distilled',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS evolution_variants (
+          id INTEGER PRIMARY KEY,
+          variant_key TEXT NOT NULL UNIQUE,
+          object_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          score REAL,
+          status TEXT NOT NULL DEFAULT 'candidate',
+          parent_key TEXT,
+          created_at TEXT NOT NULL,
+          evaluated_at TEXT
+        );
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS exported_symbol_changes (

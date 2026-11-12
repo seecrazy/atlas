@@ -46,6 +46,13 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 24. 导出符号变更传播报告。
 25. Router -> Context -> Worker -> Convergence 端到端命令。
 26. 前台增量守护循环。
+27. Schema v5：agent runs、approvals、patches、contracts、architecture docs、semantic generations、strategy rules、evolution variants。
+28. 四层 Agent、scoped source read、Kernel Budget、private score。
+29. 语义记忆生成、stale auto-review、revert lessons。
+30. 架构契约、契约影响、架构文档/ADR 索引。
+31. propose → approve → apply 补丁工作流。
+32. 策略蒸馏、离线变体评分、HTTP JSON-RPC Server。
+33. 并行解析和基础 call edge 抽取。
 
 ## 下一步
 
@@ -54,8 +61,9 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 3. 为 Go/Java/Rust parser 增加方法级 receiver 解析。
 4. 用真实项目验证 ambiguous 引用的干扰率。
 5. 在真实大仓验证 Router accuracy、导出传播和 daemon 成本。
-6. 将确定性 Pipeline Worker 替换为可受控的 LLM Worker。
-7. 用真实需求任务验证汇聚输出是否可交付。
+6. 用真实大仓评估 LLM Worker、语义记忆和影响传播质量。
+7. 将 accepted evolution variants 接入人类提升流程。
+8. 将 PR / Git remote 集成接到审批补丁之后。
 
 ## 阅读顺序
 
@@ -65,4 +73,5 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 4. `docs/adr/0001-local-sqlite-and-mcp.md`
 5. `docs/adr/0002-deterministic-router-first.md`
 6. `docs/adr/0003-deterministic-end-to-end-pipeline.md`
+7. `docs/adr/0004-kernel-agents-and-approved-changes.md`
 

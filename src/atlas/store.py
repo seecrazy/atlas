@@ -82,6 +82,9 @@ def health(conn: sqlite3.Connection) -> dict:
         row["language"]: int(row["count"])
         for row in conn.execute("SELECT language, COUNT(*) AS count FROM files GROUP BY language")
     }
+    semantic_rows = conn.execute(
+        "SELECT layer, COUNT(*) AS count FROM memories GROUP BY layer"
+    ).fetchall()
     repos = conn.execute(
         """
         SELECT r.name, r.subsystem, r.path,
@@ -121,6 +124,16 @@ def health(conn: sqlite3.Connection) -> dict:
         "exported_symbol_change_count": scalar(
             "SELECT COUNT(*) FROM exported_symbol_changes"
         ),
+        "semantic_memory_count": scalar("SELECT COUNT(*) FROM memories WHERE layer = 'semantic'"),
+        "memory_by_layer": {row["layer"]: int(row["count"]) for row in semantic_rows},
+        "contract_count": scalar("SELECT COUNT(*) FROM contracts"),
+        "architecture_doc_count": scalar("SELECT COUNT(*) FROM architecture_docs"),
+        "pending_approval_count": scalar("SELECT COUNT(*) FROM approvals WHERE status = 'pending'"),
+        "pending_patch_count": scalar("SELECT COUNT(*) FROM patches WHERE status = 'pending'"),
+        "agent_run_count": scalar("SELECT COUNT(*) FROM agent_runs"),
+        "failed_agent_run_count": scalar("SELECT COUNT(*) FROM agent_runs WHERE status = 'failed'"),
+        "strategy_rule_count": scalar("SELECT COUNT(*) FROM strategy_rules"),
+        "accepted_variant_count": scalar("SELECT COUNT(*) FROM evolution_variants WHERE status = 'accepted'"),
     }
 
 
@@ -582,6 +595,55 @@ def revoke_scope(conn: sqlite3.Connection, token: str) -> bool:
         audit(conn, "scope.revoked", {"token_hash": secrets.token_hex(8)})
         conn.commit()
     return changed
+
+
+def _physical_file_path(row: sqlite3.Row) -> pathlib.Path:
+    stable_path = str(row["path"])
+    repo_name = str(row["repo_name"])
+    relative = stable_path[len(repo_name) + 1:] if stable_path.startswith(repo_name + "/") else stable_path
+    return pathlib.Path(row["repo_path"]) / relative
+
+
+def read_scoped_file(
+    conn: sqlite3.Connection,
+    token: str,
+    file_path: str,
+    *,
+    max_chars: int = 12000,
+    actor: str = "developer-agent",
+) -> dict:
+    """Read a physical file only after server-side scope validation."""
+    scope = _active_scope(conn, token)
+    scope_paths = json.loads(scope["paths_json"])
+    if not _within_scope(file_path, scope_paths):
+        raise ScopeError(f"path is outside scope token: {file_path}")
+    row = conn.execute(
+        """
+        SELECT f.id, f.path, f.language, r.path AS repo_path, r.name AS repo_name
+        FROM files f
+        JOIN repos r ON r.id = f.repo_id
+        WHERE f.path = ?
+        """,
+        (file_path,),
+    ).fetchone()
+    if row is None:
+        raise FileNotFoundError(f"indexed file not found: {file_path}")
+    physical = _physical_file_path(row)
+    if not physical.is_file():
+        raise FileNotFoundError(f"physical file missing: {physical}")
+    try:
+        text = physical.read_text(encoding="utf-8")[:max_chars]
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot read file {file_path}: {exc}") from exc
+    truncated = len(text) >= max_chars
+    audit(conn, "scope.file_read", {"file": file_path, "truncated": truncated}, actor=actor)
+    conn.commit()
+    return {
+        "file": file_path,
+        "language": row["language"],
+        "content": text,
+        "truncated": truncated,
+    }
 
 
 def memories(

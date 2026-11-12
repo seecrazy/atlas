@@ -15,6 +15,7 @@ pythonpath = ["src"]
 [project.scripts]
 atlas = "atlas.cli:main"
 atlas-mcp = "atlas.mcp:main"
+atlas-http = "atlas.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
