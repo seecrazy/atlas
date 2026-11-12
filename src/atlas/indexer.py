@@ -649,6 +649,8 @@ def _parse_name_status(output: str) -> dict[str, str]:
         status = item[:1]
         if status in {"R", "C"} and index + 2 < len(parts):
             changed[parts[index + 2]] = status
+            if status == "R":
+                changed[parts[index + 1]] = "D"
             index += 3
         else:
             path = parts[index + 1] if index + 1 < len(parts) else ""
@@ -863,6 +865,59 @@ def _resolve_references(conn: sqlite3.Connection) -> dict:
     return counts
 
 
+def _exported_symbols(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    stable_path: str,
+) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT s.name, s.qualified_name
+        FROM symbols s
+        JOIN files f ON f.id = s.file_id
+        WHERE f.repo_id = ? AND f.path = ? AND s.exported = 1
+        ORDER BY s.qualified_name
+        """,
+        (repo_id, stable_path),
+    ).fetchall()
+    return {row["name"]: row["qualified_name"] for row in rows}
+
+
+def _record_exported_changes(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    stable_path: str,
+    old_symbols: dict[str, str],
+    new_symbols: dict[str, str],
+) -> int:
+    changes = []
+    for name, qualified_name in old_symbols.items():
+        if name not in new_symbols:
+            changes.append(("removed", name, qualified_name))
+    for name, qualified_name in new_symbols.items():
+        if name not in old_symbols:
+            changes.append(("added", name, qualified_name))
+    conn.executemany(
+        """
+        INSERT INTO exported_symbol_changes(
+          repo_id, file_path, symbol, qualified_name, change_type, indexed_at
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        [
+            (
+                repo_id,
+                stable_path,
+                symbol,
+                qualified_name,
+                change_type,
+                utcnow(),
+            )
+            for change_type, symbol, qualified_name in changes
+        ],
+    )
+    return len(changes)
+
+
 def index_project(config: ProjectConfig) -> dict:
     return index_project(config, full=False)
 
@@ -884,6 +939,7 @@ def index_project(
         "mode": "full",
         "git_candidates": 0,
         "workspace_candidates": 0,
+        "exported_symbol_changes": 0,
         "diagnostics": 0,
         "memories_marked_stale": 0,
     }
@@ -932,6 +988,10 @@ def index_project(
                     if old_file_row is not None:
                         stats["memories_marked_stale"] += mark_memory_drift(
                             conn, [int(old_file_row["id"])]
+                        )
+                        old_exports = _exported_symbols(conn, repo_id, stable_path)
+                        stats["exported_symbol_changes"] += _record_exported_changes(
+                            conn, repo_id, stable_path, old_exports, {}
                         )
                         conn.execute(
                             "DELETE FROM files WHERE repo_id = ? AND path = ?",
@@ -982,7 +1042,12 @@ def index_project(
                         stats["memories_marked_stale"] += mark_memory_drift(
                             conn, [int(old_file_row["id"])]
                         )
+                    old_exports = _exported_symbols(conn, repo_id, stable_path)
                     file_id = _insert_file_record(conn, repo_id, record)
+                    new_exports = _exported_symbols(conn, repo_id, stable_path)
+                    stats["exported_symbol_changes"] += _record_exported_changes(
+                        conn, repo_id, stable_path, old_exports, new_exports
+                    )
                     stats["diagnostics"] += _insert_diagnostics(
                         conn, repo_id, stable_path, record.diagnostics
                     )
@@ -1002,6 +1067,10 @@ def index_project(
                         )
                     }
                     for deleted_path in existing_paths - indexed_paths:
+                        removed_exports = _exported_symbols(conn, repo_id, deleted_path)
+                        stats["exported_symbol_changes"] += _record_exported_changes(
+                            conn, repo_id, deleted_path, removed_exports, {}
+                        )
                         conn.execute(
                             "DELETE FROM files WHERE repo_id = ? AND path = ?",
                             (repo_id, deleted_path),

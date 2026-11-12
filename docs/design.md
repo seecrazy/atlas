@@ -142,6 +142,18 @@ Phase 2 引入 Git-aware 增量模式：
 3. 报告包含索引规模、语言覆盖、引用解析状态、诊断、记忆状态和警告。
 4. CLI 可选择输出文件；输出目录必须已存在或使用 `--create-parents`。
 
+### Router 验证集
+
+Router 使用冻结验证集评估，验证集保存在包内 `router_cases.json`：
+
+1. 共 20 条中英文问题。
+2. 每条必须声明 `expected_intent`；部分声明 `expected_role`。
+3. `atlas validate-router` 逐条调用当前 Router。
+4. 结果写入 `router.validation` 审计事件。
+5. `atlas health` 和 `atlas report` 读取最近一次评估指标。
+6. 指标包含总数、intent accuracy、role accuracy、失败样本。
+7. 验证集本身不包含答案内容，只评估路由分类。
+
 ### Router
 
 Phase 4 首先引入确定性 Router，而不是先引入 LLM Router：
@@ -181,6 +193,43 @@ Router 的置信度只表示「分类规则和索引信号是否一致」，不�
 3. 每跳都受 `min_confidence` 过滤。
 4. 结果保留跳数、来源文件、目标文件、引用状态和置信度。
 5. 当前链路基于 import/use 边，不假设真实函数调用图。
+
+### 导出符号变更传播
+
+索引器为导出符号建立变更历史：
+
+| 状态 | 说明 |
+| --- | --- |
+| `added` | 修改/新增文件后首次出现的导出符号 |
+| `removed` | 修改/删除/重命名前存在但之后消失的导出符号 |
+| `unchanged` | 修改前后仍存在的导出符号；不写入变更历史 |
+
+`atlas propagate` / `atlas_export_propagation` 读取最近的导出变更，并为每个符号生成下游引用报告。删除文件在索引删除前先记录 removed 导出符号，避免丢失传播信号。
+
+### 端到端编排
+
+`atlas run` 将确定性链路串成一个命令：
+
+```
+question
+  -> Router
+  -> system/module/developer context packet
+  -> deterministic structural workers
+  -> upward convergence
+  -> final pipeline result
+```
+
+Worker 是结构索引驱动的确定性角色，不调用 LLM，不读取函数体，不修改代码。Pipeline 输出 route、contexts、worker findings 和 convergence。缺少索引候选时返回 warning，而不是编造证据。
+
+### 增量守护
+
+`atlas daemon` 是前台轮询循环，不是 OS daemon：
+
+1. 每个周期执行一次 `index_project`。
+2. 默认使用 Git 工作区候选和增量 hash 判断。
+3. `--interval` 控制轮询间隔。
+4. `--max-iterations` 用于测试和一次性运行。
+5. Ctrl-C 正常退出，已有错误不中断后续周期。
 
 ### 上下文包
 
@@ -250,7 +299,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 1. 配置不存在或非法时，`init` / `index` / `serve` 立即失败并给出明确错误。
 2. 解析失败的文件记录为无符号，不阻断整体索引。
 3. 解析失败和无法解码的文件写入 `index_diagnostics`，并在 health 中返回计数。
-4. 旧数据库在连接时自动迁移缺失列和 `memory_reviews`；迁移只增加列、表和索引，不删除用户数据。
+4. 旧数据库在连接时自动迁移缺失列、`memory_reviews` 和导出符号变更历史；迁移只增加列、表和索引，不删除用户数据。
 5. SQLite 使用 WAL，限制并发写冲突。
 6. MCP 查询缺少参数时返回协议级错误。
 7. scope token 不存在、过期、已撤销或范围不匹配时拒绝查询。
@@ -259,6 +308,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 10. 索引不尝试读取完整文件内容进入模型上下文。
 11. developer 上下文包只提供结构和引用边界；访问完整源码仍必须通过外部工具和 scope token。
 12. 汇聚输入中的 evidence 文件必须在索引中存在；不存在时返回显式错误。
+13. Pipeline worker 只产生结构性发现；缺少索引候选时输出 warning，不编造证据。
 
 ## 6. 安全与权限
 
@@ -267,7 +317,7 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 3. 高危操作当前不存在。
 4. scope token 是服务端校验对象，不能由客户端修改路径范围。
 5. 记忆复核是唯一的运行时记忆状态写入入口，决策来源和原因会被审计。
-6. 所有 scope 创建和使用事件写入审计表。
+6. Router 评估、导出符号变更、Pipeline 运行和 scope 使用事件写入审计表。
 
 ## 7. 验收清单
 
@@ -329,14 +379,19 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 - [x] `atlas_developer_context` 构建开发层包。
 - [x] `atlas_impact_chain` 输出两级影响传播链。
 - [x] `atlas_converge` 按上行顺序汇聚角色发现。
+- [x] Router 冻结验证集为 20 条。
+- [x] `atlas validate-router` 评估并记录 route accuracy。
+- [x] `atlas_export_propagation` 报告导出符号下游引用。
+- [x] `atlas run` 串联 Router / context / worker / convergence。
+- [x] `atlas daemon` 支持前台轮询增量索引。
 
 ## 8. 后续演进
 
 1. 增加更多语言解析器：Go、Java、Rust。
 2. 引入 tree-sitter 或稳定语言服务作为后续索引后端。
 3. 为热点文件增加按需语义摘要。
-4. 增加 Router / Worker 编排器原型。
-5. 增加 Git 事件守护进程与未提交变更监听。
+4. 将确定性 Worker 替换为受控 LLM Worker。
+5. 增加文件系统监听与长驻守护进程。
 6. 将 `create_scope` 从通用 MCP 工具迁出，改为编排器专用端点。
 7. 增加冻结验证集，用于评估索引准确率和路由质量。
 

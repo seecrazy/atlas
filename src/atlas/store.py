@@ -41,6 +41,25 @@ def _confidence(value: float | None) -> float | None:
     return value
 
 
+def _latest_router_validation(conn: sqlite3.Connection) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT payload_json, created_at
+        FROM audit_events
+        WHERE event_type = 'router.validation'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload_json"])
+    except json.JSONDecodeError:
+        return None
+    return {**payload, "validated_at": row["created_at"]}
+
+
 def health(conn: sqlite3.Connection) -> dict:
     def scalar(sql: str) -> int:
         row = conn.execute(sql).fetchone()
@@ -98,6 +117,10 @@ def health(conn: sqlite3.Connection) -> dict:
         "indexed_languages": languages,
         "diagnostics": {row["level"]: int(row["count"]) for row in diagnostic_rows},
         "diagnostic_count": scalar("SELECT COUNT(*) FROM index_diagnostics"),
+        "router_validation": _latest_router_validation(conn),
+        "exported_symbol_change_count": scalar(
+            "SELECT COUNT(*) FROM exported_symbol_changes"
+        ),
     }
 
 

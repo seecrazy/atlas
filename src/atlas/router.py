@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import json
+from pathlib import Path
 
 from .db import audit
 from .store import references, search
@@ -20,16 +22,19 @@ STOP_TERMS = {
 
 IMPACT_TERMS = {
     "impact", "affected", "affects", "references", "callers", "caller",
-    "dependency", "dependencies", "depends", "调用", "引用", "影响",
+    "reference", "references", "caller", "callers",
+    "reference", "references", "caller", "callers",
+    "dependency", "dependencies", "dependent", "depend", "depends", "consumer", "consumers",
+    "consume", "consumes", "调用", "引用", "影响",
     "依赖", "受影响", "谁用",
 }
 IMPLEMENTATION_TERMS = {
-    "implementation", "function", "method", "body", "bug", "fix", "root",
+    "implementation", "implemented", "function", "method", "body", "bug", "fix", "root",
     "cause", "debug", "实现", "函数体", "方法体", "修复", "根因", "排查",
     "调试",
 }
 MEMORY_TERMS = {
-    "memory", "lesson", "decision", "adr", "revert", "记忆", "教训",
+    "memory", "memories", "lesson", "decision", "adr", "revert", "记忆", "教训",
     "决策", "复核", "回滚",
 }
 ARCHITECTURE_TERMS = {
@@ -143,6 +148,8 @@ def route_request(conn: sqlite3.Connection, question: str, *, limit: int = 10) -
         role = "developer"
     elif _contains_any(question, ARCHITECTURE_TERMS):
         role = "architect"
+    elif _contains_any(question, SYSTEM_TERMS):
+        role = "system"
     elif len(files) == 1 and len(repos) == 1:
         role = "module"
     elif len(repos) <= 1:
@@ -216,3 +223,73 @@ def route_request(conn: sqlite3.Connection, question: str, *, limit: int = 10) -
     )
     conn.commit()
     return result
+
+
+CASES_PATH = Path(__file__).with_name("data") / "router_cases.json"
+
+
+def load_router_cases(path: str | Path | None = None) -> list[dict]:
+    path = Path(path) if path else CASES_PATH
+    with path.open("r", encoding="utf-8") as handle:
+        cases = json.load(handle)
+    if len(cases) < 10:
+        raise ValueError("router validation requires at least 10 cases")
+    for index, case in enumerate(cases):
+        if "question" not in case or "expected_intent" not in case:
+            raise ValueError(f"router case {index} requires question and expected_intent")
+        if case["expected_intent"] not in {"locate", "impact", "implementation", "memory"}:
+            raise ValueError(f"router case {index} has an invalid expected_intent")
+    return cases
+
+
+def evaluate_router(
+    conn: sqlite3.Connection,
+    *,
+    cases: list[dict] | None = None,
+    cases_path: str | Path | None = None,
+    record: bool = True,
+    limit: int = 10,
+) -> dict:
+    if cases is not None and cases_path is not None:
+        raise ValueError("pass either cases or cases_path, not both")
+    cases = load_router_cases(cases_path) if cases is None else cases
+    failures = []
+    intent_correct = 0
+    role_evaluated = 0
+    role_correct = 0
+    for index, case in enumerate(cases):
+        result = route_request(conn, case["question"], limit=limit)
+        intent_match = result["intent"] == case["expected_intent"]
+        role_match = None
+        if intent_match:
+            intent_correct += 1
+        if "expected_role" in case:
+            role_evaluated += 1
+            role_match = result["role"] == case["expected_role"]
+            if role_match:
+                role_correct += 1
+        if not intent_match or role_match is False:
+            failures.append(
+                {
+                    "index": index,
+                    "question": case["question"],
+                    "expected_intent": case["expected_intent"],
+                    "actual_intent": result["intent"],
+                    "expected_role": case.get("expected_role"),
+                    "actual_role": result["role"],
+                }
+            )
+    total = len(cases)
+    metrics = {
+        "case_count": total,
+        "intent_correct": intent_correct,
+        "intent_accuracy": round(intent_correct / total, 4) if total else 0.0,
+        "role_evaluated": role_evaluated,
+        "role_correct": role_correct,
+        "role_accuracy": round(role_correct / role_evaluated, 4) if role_evaluated else None,
+        "failures": failures,
+    }
+    if record:
+        audit(conn, "router.validation", metrics, actor="router-validator")
+        conn.commit()
+    return metrics

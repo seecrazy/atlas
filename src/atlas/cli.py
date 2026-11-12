@@ -12,6 +12,10 @@ from .db import connect
 from .indexer import index_project
 from .store import health
 from .report import health_report
+from .router import evaluate_router
+from .propagation import export_propagation
+from .pipeline import run_pipeline
+from .daemon import run_daemon
 
 
 def print_json(value: dict | list) -> None:
@@ -76,6 +80,62 @@ def command_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_validate_router(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        metrics = evaluate_router(conn, cases_path=args.cases, record=not args.no_record)
+    finally:
+        conn.close()
+    print_json(metrics)
+    return 0
+
+
+def command_run(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        result = run_pipeline(
+            conn,
+            args.question,
+            min_confidence=args.min_confidence,
+            limit=args.limit,
+        )
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_propagate(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        result = export_propagation(
+            conn,
+            limit=args.limit,
+            min_confidence=args.min_confidence,
+        )
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_daemon(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    result = run_daemon(
+        config,
+        interval=args.interval,
+        max_iterations=args.max_iterations,
+        full=args.full,
+        include_workspace=not args.no_workspace,
+        on_cycle=lambda cycle: print_json(cycle),
+    )
+    print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="atlas", description="Layered project knowledge system")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -119,6 +179,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report_parser.set_defaults(handler=command_report)
 
+    validate_parser = commands.add_parser("validate-router", help="evaluate the frozen router validation set")
+    validate_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
+    validate_parser.add_argument("--cases", help="custom JSON validation cases")
+    validate_parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="do not store validation metrics",
+    )
+    validate_parser.set_defaults(handler=command_validate_router)
+
+    run_parser = commands.add_parser("run", help="run the deterministic end-to-end pipeline")
+    run_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
+    run_parser.add_argument("question", help="developer question")
+    run_parser.add_argument("--min-confidence", type=float, default=0.65)
+    run_parser.add_argument("--limit", type=int, default=50)
+    run_parser.set_defaults(handler=command_run)
+
+    propagate_parser = commands.add_parser("propagate", help="report changed exported symbol propagation")
+    propagate_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
+    propagate_parser.add_argument("--limit", type=int, default=50)
+    propagate_parser.add_argument("--min-confidence", type=float, default=0.65)
+    propagate_parser.set_defaults(handler=command_propagate)
+
+    daemon_parser = commands.add_parser("daemon", help="run foreground incremental indexing")
+    daemon_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
+    daemon_parser.add_argument("--interval", type=float, default=5.0)
+    daemon_parser.add_argument("--max-iterations", type=int)
+    daemon_parser.add_argument("--full", action="store_true")
+    daemon_parser.add_argument("--no-workspace", action="store_true")
+    daemon_parser.set_defaults(handler=command_daemon)
+
     serve_parser = commands.add_parser("serve", help="run the MCP stdio server")
     serve_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
     serve_parser.set_defaults(handler=command_serve)
@@ -134,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("daemon stopped", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

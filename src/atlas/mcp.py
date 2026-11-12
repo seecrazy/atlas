@@ -25,6 +25,8 @@ from .store import (
     symbols,
 )
 from .router import route_request
+from .propagation import export_propagation
+from .pipeline import run_pipeline
 from .synthesis import converge_findings
 
 
@@ -101,6 +103,32 @@ TOOLS = [
                 "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
             },
             "required": ["symbol"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_export_propagation",
+        "description": "Report downstream references for recently changed exported symbols.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_pipeline",
+        "description": "Run deterministic route, context, worker, and convergence pipeline.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "minLength": 1},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": ["question"],
             "additionalProperties": False,
         },
     },
@@ -341,6 +369,19 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             args["symbol"],
             limit=args.get("limit"),
             min_confidence=args.get("min_confidence"),
+        )
+    if name == "atlas_export_propagation":
+        return export_propagation(
+            conn,
+            limit=args.get("limit"),
+            min_confidence=args.get("min_confidence"),
+        )
+    if name == "atlas_pipeline":
+        return run_pipeline(
+            conn,
+            args["question"],
+            min_confidence=args.get("min_confidence", 0.65),
+            limit=args.get("limit", 50),
         )
     if name == "atlas_file_context":
         return file_context(conn, args["file_path"], limit=args.get("limit"))

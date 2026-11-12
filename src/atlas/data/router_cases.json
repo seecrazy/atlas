@@ -1,0 +1,98 @@
+[
+  {
+    "question": "Which files reference RetryClient?",
+    "expected_intent": "impact"
+  },
+  {
+    "question": "Which callers use PaymentGateway?",
+    "expected_intent": "impact"
+  },
+  {
+    "question": "What is the impact of changing OrderService.create?",
+    "expected_intent": "impact"
+  },
+  {
+    "question": "Which subsystems depend on payment?",
+    "expected_intent": "impact",
+    "expected_role": "architect"
+  },
+  {
+    "question": "Where is execute_with_backoff implemented?",
+    "expected_intent": "implementation",
+    "expected_role": "developer"
+  },
+  {
+    "question": "Read the implementation of execute_with_backoff to find the timeout root cause",
+    "expected_intent": "implementation",
+    "expected_role": "developer"
+  },
+  {
+    "question": "How do I fix execute_with_backoff infinite retries?",
+    "expected_intent": "implementation",
+    "expected_role": "developer"
+  },
+  {
+    "question": "What is the root cause of payment timeout?",
+    "expected_intent": "implementation",
+    "expected_role": "developer"
+  },
+  {
+    "question": "Show stale memories for retry",
+    "expected_intent": "memory",
+    "expected_role": "module"
+  },
+  {
+    "question": "What lesson was recorded after revert?",
+    "expected_intent": "memory",
+    "expected_role": "module"
+  },
+  {
+    "question": "Where is the ADR for retry behavior?",
+    "expected_intent": "memory",
+    "expected_role": "module"
+  },
+  {
+    "question": "Which subsystems consume OrderService.create?",
+    "expected_intent": "impact",
+    "expected_role": "architect"
+  },
+  {
+    "question": "What is the architecture contract for payment?",
+    "expected_intent": "locate",
+    "expected_role": "architect"
+  },
+  {
+    "question": "List all subsystems and dependencies",
+    "expected_intent": "impact",
+    "expected_role": "architect"
+  },
+  {
+    "question": "Which cross-repo interfaces does payment expose?",
+    "expected_intent": "locate",
+    "expected_role": "architect"
+  },
+  {
+    "question": "Which repo contains PaymentGateway?",
+    "expected_intent": "locate",
+    "expected_role": "system"
+  },
+  {
+    "question": "Which repo owns executeWithBackoff?",
+    "expected_intent": "locate",
+    "expected_role": "system"
+  },
+  {
+    "question": "What changed in retry recently?",
+    "expected_intent": "locate",
+    "expected_role": "system"
+  },
+  {
+    "question": "重试模块的调用方有哪些？",
+    "expected_intent": "impact"
+  },
+  {
+    "question": "重试函数的实现在哪里？",
+    "expected_intent": "implementation",
+    "expected_role": "developer"
+  }
+]

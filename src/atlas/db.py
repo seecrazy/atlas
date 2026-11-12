@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -94,6 +94,16 @@ CREATE TABLE IF NOT EXISTS memory_reviews (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS exported_symbol_changes (
+  id INTEGER PRIMARY KEY,
+  repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  qualified_name TEXT NOT NULL,
+  change_type TEXT NOT NULL,
+  indexed_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scope_tokens (
   id INTEGER PRIMARY KEY,
   token TEXT NOT NULL UNIQUE,
@@ -138,6 +148,8 @@ CREATE TABLE IF NOT EXISTS index_diagnostics (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_evidence_file ON memory_evidence(file_id);
 CREATE INDEX IF NOT EXISTS idx_memory_reviews_memory ON memory_reviews(memory_id);
+CREATE INDEX IF NOT EXISTS idx_export_changes_repo ON exported_symbol_changes(repo_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_export_changes_type ON exported_symbol_changes(change_type, indexed_at);
 CREATE INDEX IF NOT EXISTS idx_scope_token ON scope_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_diagnostics_repo ON index_diagnostics(repo_id, file_path);
@@ -153,6 +165,27 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exported_symbol_changes (
+          id INTEGER PRIMARY KEY,
+          repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+          file_path TEXT NOT NULL,
+          symbol TEXT NOT NULL,
+          qualified_name TEXT NOT NULL,
+          change_type TEXT NOT NULL,
+          indexed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_export_changes_repo "
+        "ON exported_symbol_changes(repo_id, file_path)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_export_changes_type "
+        "ON exported_symbol_changes(change_type, indexed_at)"
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memory_reviews (

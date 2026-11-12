@@ -42,6 +42,10 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 20. 上行回溯汇聚格式。
 21. 未提交工作区变更检测。
 22. Markdown / JSON 健康度报告。
+23. 20 条 Router 冻结验证集与 accuracy 指标。
+24. 导出符号变更传播报告。
+25. Router -> Context -> Worker -> Convergence 端到端命令。
+26. 前台增量守护循环。
 
 ## 下一步
 
@@ -49,8 +53,8 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 2. 在真实大仓验证工作区检测成本和边界。
 3. 为 Go/Java/Rust parser 增加方法级 receiver 解析。
 4. 用真实项目验证 ambiguous 引用的干扰率。
-5. 收集 20 条真实问题，验证确定性 Router 的误路由率。
-6. 将上下文包接入实际 Worker Agent 会话。
+5. 在真实大仓验证 Router accuracy、导出传播和 daemon 成本。
+6. 将确定性 Pipeline Worker 替换为可受控的 LLM Worker。
 7. 用真实需求任务验证汇聚输出是否可交付。
 
 ## 阅读顺序
@@ -59,4 +63,6 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 2. `docs/design.md`
 3. `docs/roadmap.md`
 4. `docs/adr/0001-local-sqlite-and-mcp.md`
+5. `docs/adr/0002-deterministic-router-first.md`
+6. `docs/adr/0003-deterministic-end-to-end-pipeline.md`
 

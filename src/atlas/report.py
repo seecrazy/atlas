@@ -19,6 +19,11 @@ def _warnings(report: dict) -> list[str]:
         warnings.append(f"{unresolved + ambiguous} references are ambiguous or unresolved")
     if report.get("memory_by_status", {}).get("stale"):
         warnings.append("stale memories require review")
+    router_validation = report.get("router_validation")
+    if not router_validation:
+        warnings.append("router validation has not been run")
+    elif router_validation["intent_accuracy"] < 0.8:
+        warnings.append("router intent accuracy is below 0.8")
     return warnings
 
 
@@ -34,6 +39,7 @@ def health_report(report: dict) -> str:
         f"- References: `{report['reference_count']}`",
         f"- Memories: `{report['memory_count']}`",
         f"- Diagnostics: `{report['diagnostic_count']}`",
+        f"- Exported symbol changes: `{report['exported_symbol_change_count']}`",
         "",
         "## Language coverage",
         "",
@@ -80,6 +86,21 @@ def health_report(report: dict) -> str:
         )
     else:
         lines.append("- none")
+
+    lines.extend(["", "## Router validation", ""])
+    router_validation = report.get("router_validation")
+    if router_validation:
+        lines.extend(
+            [
+                f"- Validated at: `{router_validation['validated_at']}`",
+                f"- Cases: `{router_validation['case_count']}`",
+                f"- Intent accuracy: `{router_validation['intent_accuracy']}`",
+                f"- Role evaluated: `{router_validation['role_evaluated']}`",
+                f"- Role accuracy: `{router_validation['role_accuracy']}`",
+            ]
+        )
+    else:
+        lines.append("- not run")
 
     lines.extend(["", "## Warnings", ""])
     warnings = _warnings(report)

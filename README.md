@@ -30,6 +30,18 @@ atlas health /path/to/project
 atlas report /path/to/project
 atlas report /path/to/project --format markdown --output /tmp/atlas-health.md --create-parents
 
+# 评估 Router
+atlas validate-router /path/to/project
+
+# 运行确定性端到端编排
+atlas run /path/to/project "Which callers reference RetryClient?"
+
+# 生成导出符号传播报告
+atlas propagate /path/to/project
+
+# 前台轮询增量索引
+atlas daemon /path/to/project --interval 5 --max-iterations 1
+
 # 只处理 commit-to-commit 变化，不扫描未提交工作区
 atlas index /path/to/project --no-workspace
 
@@ -79,6 +91,37 @@ ATLAS 提供三层结构化上下文包，帮助不同粒度的 Agent 只接收�
 
 汇聚器只做结构化汇总和证据校验，不生成代码，也不自动提交修改。
 
+## 端到端编排
+
+```bash
+atlas run /path/to/project "Which callers reference RetryClient?"
+```
+
+`atlas run` 执行：
+
+1. `atlas_route` 分类问题。
+2. 构建系统 / 模块 / 开发上下文包。
+3. 运行确定性结构 Worker。
+4. 调用 `atlas_converge` 汇总。
+
+它不调用 LLM，不读取函数体，不修改代码。
+
+## 导出符号传播
+
+```bash
+atlas propagate /path/to/project
+```
+
+索引器记录导出符号的 `added` / `removed` 变更历史，报告每个变更符号的下游引用和受影响仓库。
+
+## Router 验证
+
+```bash
+atlas validate-router /path/to/project
+```
+
+ATLAS 内置 20 条冻结路由用例。结果写入审计事件，并出现在 `atlas health` 与 `atlas report` 中。
+
 ### Codex CLI 接入
 
 ```bash
@@ -109,6 +152,8 @@ args = ["--project-root", "/absolute/path/to/project"]
 | `atlas_developer_context` | 构建目标符号的窄化开发上下文 |
 | `atlas_impact_chain` | 输出两级影响传播链 |
 | `atlas_converge` | 按角色上行汇聚结构化发现 |
+| `atlas_export_propagation` | 报告导出符号变更的下游引用 |
+| `atlas_pipeline` | 串联路由、上下文、Worker 和汇聚 |
 | `atlas_memories` | 查询记忆及证据状态 |
 | `atlas_review_memory` | 提交记忆复核决策 |
 | `atlas_create_scope` | 创建短期受限访问 token |
@@ -122,6 +167,7 @@ args = ["--project-root", "/absolute/path/to/project"]
 - [路线图](docs/roadmap.md)
 - [架构决策记录](docs/adr/0001-local-sqlite-and-mcp.md)
 - [确定性 Router ADR](docs/adr/0002-deterministic-router-first.md)
+- [端到端 Pipeline ADR](docs/adr/0003-deterministic-end-to-end-pipeline.md)
 - [交接记录](docs/HANDOFF.md)
 
 ## 开发
