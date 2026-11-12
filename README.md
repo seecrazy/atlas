@@ -4,7 +4,7 @@ ATLAS 是一个面向超大项目的分层项目知识系统。它把项目组�
 
 ## 当前状态
 
-项目处于 **Phase 4 确定性路由切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java/Rust 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、引用解析置信度、确定性 Router、记忆复核闭环、索引诊断、基础 scope token 和审计记录已经可用。
+项目处于 **Phase 4 确定性路由切片**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java/Rust 基础符号抽取、SQLite 存储、本地 MCP stdio Server、Git-aware 增量索引、未提交工作区检测、引用解析置信度、确定性 Router、记忆复核闭环、索引诊断、基础 scope token 和审计记录已经可用。
 
 运行环境要求 Python 3.9+。
 
@@ -25,6 +25,13 @@ python3 -m pip install -e .
 atlas init /path/to/project
 atlas index /path/to/project
 atlas health /path/to/project
+
+# 生成健康度报告
+atlas report /path/to/project
+atlas report /path/to/project --format markdown --output /tmp/atlas-health.md --create-parents
+
+# 只处理 commit-to-commit 变化，不扫描未提交工作区
+atlas index /path/to/project --no-workspace
 
 # 强制全量重建（Git 增量索引跳过时使用）
 atlas index /path/to/project --full

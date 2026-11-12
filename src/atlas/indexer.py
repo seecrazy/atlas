@@ -633,7 +633,12 @@ def git_changed_files(
     )
     if result is None:
         return None
-    parts = result.stdout.split("\0")
+    return _parse_name_status(result.stdout)
+
+
+def _parse_name_status(output: str) -> dict[str, str]:
+    """Parse Git -z name-status records with R/C path pairs."""
+    parts = output.split("\0")
     changed: dict[str, str] = {}
     index = 0
     while index < len(parts):
@@ -650,6 +655,26 @@ def git_changed_files(
             if path:
                 changed[path] = status
             index += 2
+    return changed
+
+
+def git_workspace_changes(repo_dir: pathlib.Path, head_commit: str) -> dict[str, str] | None:
+    """Return uncommitted tracked changes plus untracked supported candidates."""
+    tracked_result = _run_git(
+        repo_dir,
+        ["diff-index", "--name-status", "--no-commit-id", "-z", "HEAD", "--"],
+    )
+    if tracked_result is None:
+        return None
+    changed = _parse_name_status(tracked_result.stdout)
+    untracked_result = _run_git(
+        repo_dir,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    if untracked_result is not None:
+        for path in untracked_result.stdout.split("\0"):
+            if path:
+                changed[path] = "A"
     return changed
 
 
@@ -842,7 +867,12 @@ def index_project(config: ProjectConfig) -> dict:
     return index_project(config, full=False)
 
 
-def index_project(config: ProjectConfig, *, full: bool = False) -> dict:
+def index_project(
+    config: ProjectConfig,
+    *,
+    full: bool = False,
+    include_workspace: bool = True,
+) -> dict:
     conn = connect(config.db_path, create=True)
     stats = {
         "repos": 0,
@@ -853,6 +883,7 @@ def index_project(config: ProjectConfig, *, full: bool = False) -> dict:
         "imports": 0,
         "mode": "full",
         "git_candidates": 0,
+        "workspace_candidates": 0,
         "diagnostics": 0,
         "memories_marked_stale": 0,
     }
@@ -870,14 +901,23 @@ def index_project(config: ProjectConfig, *, full: bool = False) -> dict:
                 previous_commit = None if full else _last_indexed_commit(conn, repo_id)
                 changed_paths: dict[str, str] = {}
                 incremental = bool(head_commit and previous_commit)
+                if incremental:
+                    stats["mode"] = "git-diff-tree"
                 if incremental and previous_commit != head_commit:
                     diff_result = git_changed_files(repo_dir, previous_commit, head_commit)
                     if diff_result is None:
                         incremental = False
                     else:
                         changed_paths = diff_result
+                if incremental and include_workspace and head_commit:
+                    workspace_result = git_workspace_changes(repo_dir, head_commit)
+                    if workspace_result is None:
+                        incremental = False
+                    else:
+                        changed_paths.update(workspace_result)
+                        stats["mode"] = "git-worktree"
+                        stats["workspace_candidates"] += len(workspace_result)
                 if incremental:
-                    stats["mode"] = "git-diff-tree"
                     stats["git_candidates"] += len(changed_paths)
 
                 # Deletions are removed directly; they cannot be scanned as files.
@@ -950,19 +990,22 @@ def index_project(config: ProjectConfig, *, full: bool = False) -> dict:
 
                 _record_index_state(conn, repo_id, head_commit)
 
-                # Remove files deleted from the working tree. This deliberately
-                # keeps unchanged rows untouched so incremental indexing stays cheap.
-                existing_paths = {
-                    row["path"]
-                    for row in conn.execute(
-                        "SELECT path FROM files WHERE repo_id = ?", (repo_id,)
-                    )
-                }
-                for deleted_path in existing_paths - indexed_paths:
-                    conn.execute(
-                        "DELETE FROM files WHERE repo_id = ? AND path = ?",
-                        (repo_id, deleted_path),
-                    )
+                # Full scans reconcile deletions by comparing the complete path set.
+                # Incremental scans already handled explicit D statuses; reconciling
+                # against a partial candidate set would incorrectly delete unaffected
+                # files.
+                if not incremental:
+                    existing_paths = {
+                        row["path"]
+                        for row in conn.execute(
+                            "SELECT path FROM files WHERE repo_id = ?", (repo_id,)
+                        )
+                    }
+                    for deleted_path in existing_paths - indexed_paths:
+                        conn.execute(
+                            "DELETE FROM files WHERE repo_id = ? AND path = ?",
+                            (repo_id, deleted_path),
+                        )
         # Python sqlite lacks tuple predicates; do a straightforward reconciliation.
         all_repo_rows = conn.execute("SELECT id FROM repos").fetchall()
         for repo_row in all_repo_rows:

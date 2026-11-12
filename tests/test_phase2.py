@@ -7,6 +7,7 @@ from atlas.config import load_config, write_default_config
 from atlas.context import developer_context, module_context, system_context
 from atlas.db import SCHEMA_VERSION, connect, utcnow
 from atlas.indexer import index_project
+from atlas.report import health_report
 from atlas.router import route_request
 from atlas.store import health, impact, memories, references, review_memory, search
 from atlas.store import impact_chain
@@ -522,7 +523,7 @@ def test_git_incremental_index(tmp_path: pathlib.Path) -> None:
     _git("add", ".", cwd=root)
     _git("commit", "-m", "update second and delete first", cwd=root)
 
-    second = index_project(config)
+    second = index_project(config, include_workspace=False)
     assert second["mode"] == "git-diff-tree"
     assert second["git_candidates"] == 2
     assert second["files_changed"] == 1
@@ -538,3 +539,85 @@ def test_git_incremental_index(tmp_path: pathlib.Path) -> None:
         assert any(item["name"] == "third" for item in search(conn, "third"))
     finally:
         conn.close()
+
+
+def test_workspace_change_detection(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "workspace-project"
+    source_dir = root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "stable.py").write_text(
+        "def stable():\n    return True\n", encoding="utf-8"
+    )
+    (source_dir / "changed.py").write_text(
+        "def changed():\n    return 1\n", encoding="utf-8"
+    )
+    write_default_config(root, overwrite=True)
+    (root / ".gitignore").write_text(".atlas/\n", encoding="utf-8")
+    _git("init", cwd=root)
+    _git("config", "user.name", "Atlas Test", cwd=root)
+    _git("config", "user.email", "atlas@example.com", cwd=root)
+    _git("add", ".", cwd=root)
+    _git("commit", "-m", "initial", cwd=root)
+
+    config = load_config(root)
+    first = index_project(config, full=True)
+    assert first["mode"] == "full"
+    assert first["files_changed"] == 2
+
+    # An unrelated committed file proves partial candidate scans do not delete
+    # unaffected index rows.
+    (source_dir / "changed.py").write_text(
+        "def changed():\n    return 2\n\n\ndef changed_again():\n    return 3\n",
+        encoding="utf-8",
+    )
+    (source_dir / "added.py").write_text(
+        "def added():\n    return True\n", encoding="utf-8"
+    )
+    second = index_project(config)
+    assert second["mode"] == "git-worktree"
+    assert second["workspace_candidates"] == 2
+    assert second["files_changed"] == 2
+
+    conn = connect(config.db_path)
+    try:
+        paths = {
+            row["path"]
+            for row in conn.execute("SELECT path FROM files WHERE repo_id = 1")
+        }
+        assert "workspace-project/src/stable.py" in paths
+        assert "workspace-project/src/changed.py" in paths
+        assert "workspace-project/src/added.py" in paths
+    finally:
+        conn.close()
+
+    # Workspace changes remain candidates because no commit moved HEAD, but the
+    # content hashes make the second pass effectively no-op.
+    third = index_project(config)
+    assert third["mode"] == "git-worktree"
+    assert third["files_changed"] == 0
+    assert third["files_unchanged"] == 2
+
+    no_workspace = index_project(config, include_workspace=False)
+    assert no_workspace["mode"] == "git-diff-tree"
+    assert no_workspace["workspace_candidates"] == 0
+    assert no_workspace["files_changed"] == 0
+
+
+def test_health_report_markdown(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "report-project"
+    root.mkdir()
+    (root / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    (root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    write_default_config(root, overwrite=True)
+    config = load_config(root)
+    index_project(config, full=True)
+
+    conn = connect(config.db_path)
+    try:
+        report = health_report(health(conn))
+    finally:
+        conn.close()
+    assert report.startswith("# ATLAS Health Report")
+    assert "`python`: `2`" in report
+    assert "Index diagnostics contain errors" not in report
+    assert "index diagnostics contain errors" in report

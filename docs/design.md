@@ -123,10 +123,24 @@ Phase 2 引入 Git-aware 增量模式：
 3. 后续索引读取 Git 变更集合，只把变更路径作为候选文件。
 4. 候选文件仍使用内容 hash 校验，避免索引器误读文件系统缓存。
 5. 删除文件会从文件、符号、引用和证据关联中同步清理。
-6. 非 Git 仓库或 Git 命令失败时降级为全量扫描，保证可用性。
-7. `full=True` CLI 参数可以强制全量重建候选集合。
+6. 非 Git 仓库、仓库没有 commit、或 Git 命令失败时降级为全量扫描，保证可用性。
+7. 默认候选集合包含未提交工作区变更：
+   - tracked 修改和删除通过 `git diff-index` 检测；
+   - untracked 文件通过 `git ls-files --others --exclude-standard` 检测；
+   - commit diff 与工作区变更合并，同名路径以工作区状态优先。
+8. `full=True` 强制全量重建候选集合。
+9. `no_workspace=True` 可退回到只处理 commit-to-commit 变化的旧模式。
 
-当前增量索引只覆盖提交间变化，不承诺处理所有未提交工作区状态。未提交变更可以直接使用 `atlas index --full` 重建。
+内容 hash 仍是最终判断标准；Git 状态只用于缩小候选集合，不会把未实际变化的文件写入索引。
+
+### 健康度报告
+
+`atlas report` 从 SQLite 生成项目健康度报告：
+
+1. JSON 格式给程序消费。
+2. Markdown 格式给人类审阅。
+3. 报告包含索引规模、语言覆盖、引用解析状态、诊断、记忆状态和警告。
+4. CLI 可选择输出文件；输出目录必须已存在或使用 `--create-parents`。
 
 ### Router
 
@@ -283,6 +297,13 @@ Server 实现为 JSON-RPC over stdio，支持 `initialize`、`tools/list`、`too
 ### 质量
 
 - [x] pytest 覆盖索引、搜索、引用、scope 和 MCP 协议。
+
+### Phase 2 工作区与健康报告
+
+- [x] tracked 工作区修改 / 删除检测。
+- [x] untracked 文件检测。
+- [x] Git 增量候选合并策略。
+- [x] Markdown / JSON 健康度报告。
 
 ### Phase 2 增量与语言
 

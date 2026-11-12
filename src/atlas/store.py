@@ -63,10 +63,27 @@ def health(conn: sqlite3.Connection) -> dict:
         row["language"]: int(row["count"])
         for row in conn.execute("SELECT language, COUNT(*) AS count FROM files GROUP BY language")
     }
-    repos = conn.execute("SELECT name, subsystem, path FROM repos ORDER BY name").fetchall()
+    repos = conn.execute(
+        """
+        SELECT r.name, r.subsystem, r.path,
+               COUNT(DISTINCT f.id) AS file_count,
+               COUNT(DISTINCT s.id) AS symbol_count
+        FROM repos r
+        LEFT JOIN files f ON f.repo_id = r.id
+        LEFT JOIN symbols s ON s.repo_id = r.id
+        GROUP BY r.id, r.name, r.subsystem, r.path
+        ORDER BY r.name
+        """
+    ).fetchall()
     return {
         "repos": [
-            {"name": row["name"], "subsystem": row["subsystem"], "path": row["path"]}
+            {
+                "name": row["name"],
+                "subsystem": row["subsystem"],
+                "path": row["path"],
+                "file_count": int(row["file_count"]),
+                "symbol_count": int(row["symbol_count"]),
+            }
             for row in repos
         ],
         "repo_count": len(repos),

@@ -1,0 +1,91 @@
+"""Human-readable project health reports."""
+
+from __future__ import annotations
+
+from .db import SCHEMA_VERSION
+
+
+def _warnings(report: dict) -> list[str]:
+    warnings = []
+    if report["repo_count"] == 0:
+        warnings.append("no repositories are indexed")
+    if report["file_count"] == 0:
+        warnings.append("no files are indexed")
+    if report["diagnostics"].get("error"):
+        warnings.append("index diagnostics contain errors")
+    unresolved = report.get("references_by_resolution", {}).get("unresolved", 0)
+    ambiguous = report.get("references_by_resolution", {}).get("ambiguous", 0)
+    if unresolved or ambiguous:
+        warnings.append(f"{unresolved + ambiguous} references are ambiguous or unresolved")
+    if report.get("memory_by_status", {}).get("stale"):
+        warnings.append("stale memories require review")
+    return warnings
+
+
+def health_report(report: dict) -> str:
+    """Render ATLAS health as deterministic Markdown."""
+    lines = [
+        "# ATLAS Health Report",
+        "",
+        f"- Schema version: `{SCHEMA_VERSION}`",
+        f"- Repositories: `{report['repo_count']}`",
+        f"- Files: `{report['file_count']}`",
+        f"- Symbols: `{report['symbol_count']}`",
+        f"- References: `{report['reference_count']}`",
+        f"- Memories: `{report['memory_count']}`",
+        f"- Diagnostics: `{report['diagnostic_count']}`",
+        "",
+        "## Language coverage",
+        "",
+    ]
+    if report["indexed_languages"]:
+        lines.extend(
+            f"- `{language}`: `{count}`"
+            for language, count in sorted(report["indexed_languages"].items())
+        )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Repositories", "", "| Repo | Subsystem | Files | Symbols |", "| --- | --- | ---: | ---: |"])
+    for repo in report["repos"]:
+        lines.append(
+            f"| `{repo['name']}` | `{repo['subsystem']}` | {repo['file_count']} | {repo['symbol_count']} |"
+        )
+    if not report["repos"]:
+        lines.append("| none | - | 0 | 0 |")
+
+    lines.extend(["", "## Reference resolution", ""])
+    if report.get("references_by_resolution"):
+        lines.extend(
+            f"- `{status}`: `{count}`"
+            for status, count in sorted(report["references_by_resolution"].items())
+        )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Memory status", ""])
+    if report.get("memory_by_status"):
+        lines.extend(
+            f"- `{status}`: `{count}`"
+            for status, count in sorted(report["memory_by_status"].items())
+        )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Index diagnostics", ""])
+    if report.get("diagnostics"):
+        lines.extend(
+            f"- `{level}`: `{count}`"
+            for level, count in sorted(report["diagnostics"].items())
+        )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Warnings", ""])
+    warnings = _warnings(report)
+    if warnings:
+        lines.extend(f"- {warning}" for warning in warnings)
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
