@@ -75,6 +75,8 @@ def _upsert_memory(
             "INSERT OR IGNORE INTO memory_evidence(memory_id, file_id, start_line, end_line) VALUES(?,?,?,?)",
             (memory_id, item["file_id"], item["start_line"], item["end_line"]),
         )
+    if fields:
+        _set_memory_fields(conn, memory_id, fields)
     return key
 
 
