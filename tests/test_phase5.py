@@ -127,7 +127,7 @@ def test_approved_patch_workflow(project_root):
         assert "def execute_with_backoff" in proposed["diff"]
 
         with pytest.raises(ValueError):
-            apply_patch(conn, proposed["patch_key"], applied_by="human")
+            apply_patch(conn, config, proposed["patch_key"], applied_by="human")
 
         decided = decide_patch(
             conn,
@@ -139,9 +139,10 @@ def test_approved_patch_workflow(project_root):
         assert decided["status"] == "approved"
         applied = apply_patch(
             conn,
+            config,
             proposed["patch_key"],
             applied_by="human",
-            test_command="true",
+
         )
         assert applied["status"] == "applied"
         assert new_text in target.read_text(encoding="utf-8")

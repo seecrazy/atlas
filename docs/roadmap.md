@@ -54,6 +54,14 @@
 - [x] Git / PR 发布工作流。
 - [x] semantic / agent / router evaluation harness。
 - [x] strategy variant promotion / rollback。
+- [x] Python relative import resolver。
+- [x] TS/JS relative import path resolver。
+- [x] call edge confidence downgrade。
+- [x] symbol signature hash 与 signature_changed。
+- [x] scoped file read symlink escape protection。
+- [x] patch test command allowlist。
+- [x] patch publish Git worktree 隔离。
+- [x] MCP input schema validation。
 
 ### Phase 3：记忆复核第一闭环
 

@@ -39,6 +39,14 @@ class ProjectConfig:
         "model_env": "ATLAS_LLM_MODEL",
     })
     parser_backend: str = "auto"
+    allowed_test_commands: tuple[str, ...] = (
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "npm test",
+        "go test ./...",
+        "mvn test",
+    )
 
     @property
     def atlas_dir(self) -> pathlib.Path:
@@ -79,6 +87,14 @@ def default_config(project_root: pathlib.Path) -> dict:
             "model_env": "ATLAS_LLM_MODEL",
         },
         "parser_backend": "auto",
+        "allowed_test_commands": [
+            "pytest",
+            "python -m pytest",
+            "python3 -m pytest",
+            "npm test",
+            "go test ./...",
+            "mvn test",
+        ],
     }
 
 
@@ -164,6 +180,16 @@ def load_config(project_root: str | pathlib.Path) -> ProjectConfig:
     parser_backend = str(raw.get("parser_backend", "auto")).lower()
     if parser_backend not in {"auto", "tree-sitter", "builtin"}:
         raise ConfigError("config.parser_backend must be auto, tree-sitter, or builtin")
+    allowed_test_commands = raw.get(
+        "allowed_test_commands",
+        default_config(root)["allowed_test_commands"],
+    )
+    if not isinstance(allowed_test_commands, list) or not all(
+        isinstance(item, str) and item.strip() for item in allowed_test_commands
+    ):
+        raise ConfigError(
+            "config.allowed_test_commands must be a list of non-empty command strings"
+        )
     return ProjectConfig(
         project_root=root,
         project=project.strip(),
@@ -176,5 +202,6 @@ def load_config(project_root: str | pathlib.Path) -> ProjectConfig:
         budgets=budgets,
         llm=llm,
         parser_backend=parser_backend,
+        allowed_test_commands=tuple(item.strip() for item in allowed_test_commands),
     )
 

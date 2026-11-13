@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS symbols (
   start_line INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
   exported INTEGER NOT NULL DEFAULT 0
+  ,signature_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS refs (
@@ -426,6 +427,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_memory_reviews_memory ON memory_reviews(memory_id)"
     )
+    if "symbols" in {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'"
+        )
+    }:
+        columns = _table_columns(conn, "symbols")
+        if "signature_hash" not in columns:
+            conn.execute("ALTER TABLE symbols ADD COLUMN signature_hash TEXT")
     if "refs" not in {
         row["name"]
         for row in conn.execute(

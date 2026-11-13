@@ -666,7 +666,48 @@ def _error_result(message: str) -> dict:
     }
 
 
+def _validate_tool_arguments(name: str, args: dict) -> None:
+    schema = next((tool["inputSchema"] for tool in TOOLS if tool["name"] == name), None)
+    if schema is None:
+        return
+    properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        unknown = set(args) - set(properties)
+        if unknown:
+            raise ValueError(f"unknown arguments: {', '.join(sorted(unknown))}")
+    for key in schema.get("required", []):
+        if key not in args:
+            raise ValueError(f"missing required argument: {key}")
+    for key, value in args.items():
+        if key not in properties:
+            continue
+        rule = properties[key]
+        expected = rule.get("type")
+        checks = {
+            "object": lambda item: isinstance(item, dict),
+            "array": lambda item: isinstance(item, list),
+            "string": lambda item: isinstance(item, str),
+            "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+            "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+            "boolean": lambda item: isinstance(item, bool),
+        }
+        if expected in checks and not checks[expected](value):
+            raise ValueError(f"argument {key} must be {expected}")
+        if expected == "array" and isinstance(value, list):
+            if "minItems" in rule and len(value) < rule["minItems"]:
+                raise ValueError(f"argument {key} requires at least {rule['minItems']} items")
+        if "enum" in rule and value not in rule["enum"]:
+            raise ValueError(f"argument {key} must be one of: {', '.join(rule['enum'])}")
+        if "minLength" in rule and isinstance(value, str) and len(value) < rule["minLength"]:
+            raise ValueError(f"argument {key} is too short")
+        if "minimum" in rule and isinstance(value, (int, float)) and value < rule["minimum"]:
+            raise ValueError(f"argument {key} is below minimum {rule['minimum']}")
+        if "maximum" in rule and isinstance(value, (int, float)) and value > rule["maximum"]:
+            raise ValueError(f"argument {key} is above maximum {rule['maximum']}")
+
+
 def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
+    _validate_tool_arguments(name, args)
     if name == "atlas_health":
         return health(conn)
     if name == "atlas_search":
@@ -839,6 +880,7 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
     if name == "atlas_apply_patch":
         return apply_patch(
             conn,
+            config,
             args["patch_key"],
             applied_by=args["applied_by"],
             test_command=args.get("test_command"),

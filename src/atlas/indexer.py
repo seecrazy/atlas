@@ -57,6 +57,7 @@ class Symbol:
     end_line: int
     exported: bool
     parent_qualified: str | None = None
+    signature_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,23 @@ def module_name_from_path(path: pathlib.Path) -> str:
 
 def content_digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _signature_hash(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _python_signature(node: ast.AST) -> str:
+    args = getattr(node, "args", None)
+    signature = ast.unparse(args) if args is not None else ""
+    returns = getattr(node, "returns", None)
+    if returns is not None:
+        signature = f"{signature} -> {ast.unparse(returns)}"
+    decorators = [ast.unparse(item) for item in getattr(node, "decorator_list", [])]
+    if decorators:
+        signature = f"({' '.join(decorators)}) {signature}"
+    return signature
 
 
 def _diagnostic(level: str, code: str, message: str) -> tuple[dict, ...]:
@@ -135,6 +153,11 @@ def extract_python(path: pathlib.Path, module_name: str) -> tuple[FileRecord, by
         exported: bool,
     ) -> None:
         qualified = f"{parent}.{name}" if parent else f"{module_name}.{name}"
+        signature_hash = (
+            _signature_hash(_python_signature(node))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else None
+        )
         symbols.append(
             Symbol(
                 name=name,
@@ -144,6 +167,7 @@ def extract_python(path: pathlib.Path, module_name: str) -> tuple[FileRecord, by
                 end_line=getattr(node, "end_lineno", getattr(node, "lineno", 1)),
                 exported=exported,
                 parent_qualified=parent,
+            signature_hash=signature_hash,
             )
         )
 
@@ -156,6 +180,12 @@ def extract_python(path: pathlib.Path, module_name: str) -> tuple[FileRecord, by
                         imports.append({"target": alias.name, "line": line, "kind": "import"})
                 else:
                     base = child.module or ""
+                    if child.level:
+                        package_parts = module_name.split(".")[:-1] if "." in module_name else []
+                        for _ in range(child.level - 1):
+                            if package_parts:
+                                package_parts.pop()
+                        base = ".".join([*package_parts, base]) if base else ".".join(package_parts)
                     for alias in child.names:
                         target = f"{base}.{alias.name}" if base else alias.name
                         imports.append({"target": target, "line": line, "kind": "import"})
@@ -644,7 +674,7 @@ def scan_repo(repo_dir: pathlib.Path, project_config: ProjectConfig) -> list[Fil
     records: list[FileRecord] = []
     paths = [
         path for path in sorted(repo_dir.rglob("*"))
-        if path.is_file() and not is_excluded(path, project_config)
+        if not path.is_symlink() and path.is_file() and not is_excluded(path, project_config)
     ]
     if not paths:
         return records
@@ -819,7 +849,13 @@ def _file_changed(
     return row is None or row["content_hash"] != record.content_hash
 
 
-def _insert_file_record(conn: sqlite3.Connection, repo_id: int, record: FileRecord) -> int:
+def _insert_file_record(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    record: FileRecord,
+    repo_dir: pathlib.Path | None = None,
+    repo_name: str | None = None,
+) -> int:
     conn.execute(
         """
         DELETE FROM symbols WHERE file_id = (
@@ -853,8 +889,8 @@ def _insert_file_record(conn: sqlite3.Connection, repo_id: int, record: FileReco
             """
             INSERT INTO symbols(
               file_id, repo_id, name, qualified_name, kind,
-              parent_qualified, start_line, end_line, exported
-            ) VALUES(?,?,?,?,?,?,?,?,?)
+              parent_qualified, start_line, end_line, exported, signature_hash
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 file_id,
@@ -866,8 +902,39 @@ def _insert_file_record(conn: sqlite3.Connection, repo_id: int, record: FileReco
                 symbol.start_line,
                 symbol.end_line,
                 int(symbol.exported),
+                symbol.signature_hash,
             ),
         )
+    if repo_dir is not None and repo_name:
+        relative = record.path[len(repo_name) + 1:] if record.path.startswith(repo_name + "/") else record.path
+        physical = repo_dir / relative
+        if physical.is_file():
+            try:
+                source_lines = physical.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                source_lines = []
+            replacements: dict[str, Symbol] = {}
+            for symbol in record.symbols:
+                if symbol.signature_hash or not (1 <= symbol.start_line <= len(source_lines)):
+                    continue
+                end_line = min(max(symbol.end_line, symbol.start_line), len(source_lines))
+                segment = "\n".join(source_lines[symbol.start_line - 1:end_line])
+                brace = segment.find("{")
+                if brace >= 0:
+                    segment = segment[:brace]
+                replacements[symbol.qualified_name] = replace(
+                    symbol,
+                    signature_hash=_signature_hash(segment),
+                )
+            record = replace(
+                record,
+                symbols=tuple(replacements.get(item.qualified_name, item) for item in record.symbols),
+            )
+            for symbol in record.symbols:
+                conn.execute(
+                    "UPDATE symbols SET signature_hash = ? WHERE file_id = ? AND qualified_name = ?",
+                    (symbol.signature_hash, file_id, symbol.qualified_name),
+                )
     seen_edges: set[tuple[str, int, str]] = set()
     for imported in record.imports:
         edge = (imported["target"], imported["line"], imported["kind"])
@@ -875,8 +942,19 @@ def _insert_file_record(conn: sqlite3.Connection, repo_id: int, record: FileReco
             continue
         seen_edges.add(edge)
         conn.execute(
-            "INSERT INTO refs(source_file_id, source_repo_id, target_name, line, kind) VALUES(?,?,?,?,?)",
-            (file_id, repo_id, imported["target"], imported["line"], imported["kind"]),
+        """
+        INSERT INTO refs(
+          source_file_id, source_repo_id, target_name, line, kind, confidence
+        ) VALUES(?,?,?,?,?,?)
+        """,
+        (
+            file_id,
+            repo_id,
+            imported["target"],
+            imported["line"],
+            imported["kind"],
+            0.45 if imported["kind"] == "call" else 0.0,
+        ),
         )
     return file_id
 
@@ -901,8 +979,52 @@ def mark_memory_drift(conn: sqlite3.Connection, file_ids: list[int]) -> int:
 
 def _resolve_references(conn: sqlite3.Connection) -> dict:
     """Bind import/use edges to indexed symbols when a mechanical match exists."""
+    file_rows = conn.execute(
+        """
+        SELECT f.id, f.path, f.module_name, f.language, r.name AS repo_name
+        FROM files f
+        JOIN repos r ON r.id = f.repo_id
+        """
+    ).fetchall()
+    module_files: dict[tuple[str, str], sqlite3.Row] = {}
+    file_paths: set[str] = set()
+    for row in file_rows:
+        module_files[(row["repo_name"], row["module_name"])] = row
+        file_paths.add(row["path"])
+
+    def resolve_relative_import(
+        source_path: str,
+        target: str,
+        language: str = "python",
+    ) -> str | None:
+        if not target.startswith("."):
+            return None
+        source_parts = pathlib.PurePosixPath(source_path).parts
+        if not source_parts:
+            return None
+        source_dir = "/".join(source_parts[:-1])
+        base = pathlib.PurePosixPath(source_dir + "/" + target).as_posix()
+        suffixes = (".py", "") if language == "python" else ("", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+        for suffix in suffixes:
+            candidate = base + suffix
+            if candidate in file_paths:
+                return candidate
+        if language != "python":
+            for suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+                candidate = base + "/index" + suffix
+                if candidate in file_paths:
+                    return candidate
+        return None
+
     rows = conn.execute(
-        "SELECT id, target_name, source_repo_id FROM refs ORDER BY id"
+        """
+        SELECT ref.id, ref.target_name, ref.source_repo_id, ref.kind,
+               f.path AS source_path, f.language AS source_language, r.name AS source_repo_name
+        FROM refs ref
+        JOIN files f ON f.id = ref.source_file_id
+        JOIN repos r ON r.id = ref.source_repo_id
+        ORDER BY ref.id
+        """
     ).fetchall()
     counts = {"resolved": 0, "unique_name": 0, "ambiguous": 0, "unresolved": 0}
     for row in rows:
@@ -916,29 +1038,54 @@ def _resolve_references(conn: sqlite3.Connection) -> dict:
             method = "qualified_name"
             confidence = 0.95
         else:
-            if "/" in target:
-                candidate = pathlib.PurePosixPath(target).name
-            else:
-                candidate = target.rsplit(".", 1)[-1]
-            symbol_rows = conn.execute(
-                "SELECT id, qualified_name, repo_id FROM symbols WHERE name = ? ORDER BY id",
-                (candidate,),
-            ).fetchall()
-            if len(symbol_rows) == 1:
-                status = "unique_name"
-                method = "unique_name"
-                confidence = 0.65
-            elif len(symbol_rows) > 1:
-                status = "ambiguous"
-                method = "same_name_candidates"
-                confidence = 0.45
-            else:
-                status = "unresolved"
-                method = None
-                confidence = 0.0
+            # Path-based resolution handles relative TS/JS imports that do not
+            # carry their imported symbol name in target_name.
+            target_file = resolve_relative_import(row["source_path"], target, row["source_language"])
+            if target_file:
+                symbol_rows = conn.execute(
+                    """
+                    SELECT s.id, s.qualified_name, s.repo_id
+                    FROM symbols s
+                    JOIN files f ON f.id = s.file_id
+                    WHERE f.path = ? AND s.exported = 1
+                    ORDER BY CASE WHEN s.name = ? THEN 0 ELSE 1 END, s.name
+                    """,
+                    (target_file, pathlib.PurePosixPath(target).stem),
+                ).fetchall()
+                if len(symbol_rows) == 1:
+                    status = "resolved"
+                    method = "relative_path"
+                    confidence = 0.85
+                elif len(symbol_rows) > 1:
+                    status = "ambiguous"
+                    method = "relative_path_candidates"
+                    confidence = 0.55
+            if len(symbol_rows) != 1:
+                if "/" in target:
+                    candidate = pathlib.PurePosixPath(target).name
+                else:
+                    candidate = target.rsplit(".", 1)[-1]
+                symbol_rows = conn.execute(
+                    "SELECT id, qualified_name, repo_id FROM symbols WHERE name = ? ORDER BY id",
+                    (candidate,),
+                ).fetchall()
+                if len(symbol_rows) == 1:
+                    status = "unique_name"
+                    method = "unique_name"
+                    confidence = 0.65
+                elif len(symbol_rows) > 1:
+                    status = "ambiguous"
+                    method = "same_name_candidates"
+                    confidence = 0.45
+                else:
+                    status = "unresolved"
+                    method = None
+                    confidence = 0.0
 
         symbol_id = symbol_rows[0]["id"] if len(symbol_rows) == 1 else None
         symbol_name = symbol_rows[0]["qualified_name"] if len(symbol_rows) == 1 else None
+        if row["kind"] == "call":
+            confidence = min(confidence if confidence > 0 else 0.45, 0.55)
         conn.execute(
             """
             UPDATE refs
@@ -959,7 +1106,7 @@ def _exported_symbols(
 ) -> dict[str, str]:
     rows = conn.execute(
         """
-        SELECT s.name, s.qualified_name
+        SELECT s.name, s.qualified_name, s.signature_hash
         FROM symbols s
         JOIN files f ON f.id = s.file_id
         WHERE f.repo_id = ? AND f.path = ? AND s.exported = 1
@@ -967,7 +1114,10 @@ def _exported_symbols(
         """,
         (repo_id, stable_path),
     ).fetchall()
-    return {row["name"]: row["qualified_name"] for row in rows}
+    return {
+        row["name"]: f"{row['qualified_name']}::{row['signature_hash'] or ''}"
+        for row in rows
+    }
 
 
 def _record_exported_changes(
@@ -978,12 +1128,14 @@ def _record_exported_changes(
     new_symbols: dict[str, str],
 ) -> int:
     changes = []
-    for name, qualified_name in old_symbols.items():
+    for name, signature in old_symbols.items():
         if name not in new_symbols:
-            changes.append(("removed", name, qualified_name))
-    for name, qualified_name in new_symbols.items():
+            changes.append(("removed", name, signature.split("::", 1)[0]))
+    for name, signature in new_symbols.items():
         if name not in old_symbols:
-            changes.append(("added", name, qualified_name))
+            changes.append(("added", name, signature.split("::", 1)[0]))
+        elif old_symbols[name] != signature:
+            changes.append(("signature_changed", name, signature.split("::", 1)[0]))
     conn.executemany(
         """
         INSERT INTO exported_symbol_changes(
@@ -1136,7 +1288,7 @@ def index_project(
                             conn, [int(old_file_row["id"])]
                         )
                     old_exports = _exported_symbols(conn, repo_id, stable_path)
-                    file_id = _insert_file_record(conn, repo_id, record)
+                    file_id = _insert_file_record(conn, repo_id, record, repo_dir, repo_name)
                     new_exports = _exported_symbols(conn, repo_id, stable_path)
                     stats["exported_symbol_changes"] += _record_exported_changes(
                         conn, repo_id, stable_path, old_exports, new_exports

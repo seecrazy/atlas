@@ -417,6 +417,46 @@ Kernel 是不可绕过的执行边界：
 4. 可选 `--test-command` 在本地沙盒命令中执行测试；失败则不写文件。
 5. 应用写入 `patch.applied` 审计。
 
+### P0 正确性与安全
+
+#### Import resolver
+
+1. Python 相对 import 在 AST 抽取时转换为稳定模块目标。
+2. TS/JS 相对 import 通过索引文件路径解析，支持扩展名和 `index` 文件。
+3. call edge 使用 `0.45~0.55` 低置信度， unresolved call 不伪装成精确调用图。
+4. resolved/unique_name/ambiguous/unresolved 仍是显式状态。
+
+#### Signature change
+
+1. symbols 新增 `signature_hash`。
+2. Python 使用参数、返回类型、装饰器生成 hash。
+3. 其他语言使用声明段生成 hash。
+4. 导出符号变更区分 `added`、`removed`、`signature_changed`。
+
+#### Scope path containment
+
+1. scoped physical file read 会解析 real path。
+2. 拒绝 real path 逃出 repo root。
+3. 拒绝路径中的 symlink。
+4. 索引器跳过 symlink 文件，避免把仓库外内容引入索引。
+
+#### Patch command allowlist
+
+1. `apply_patch` 的 test command 必须在 `config.allowed_test_commands` 中精确匹配。
+2. 未配置时使用安全默认 allowlist。
+3. 任意 shell 命令不能作为 test command。
+
+#### Git worktree publication
+
+1. 补丁发布使用临时 `git worktree`。
+2. 不 checkout 或污染用户当前工作区。
+3. 分支、commit、push、PR 操作均在 worktree 中执行。
+
+#### MCP input validation
+
+1. 每个 MCP tool call 都按声明 schema 校验。
+2. 拒绝 unknown fields、缺失 required fields、类型错误、enum 错误和范围错误。
+
 ### 离线进化
 
 `atlas evolution` 只在离线边界运行：

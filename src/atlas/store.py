@@ -720,6 +720,19 @@ def _physical_file_path(row: sqlite3.Row) -> pathlib.Path:
     return pathlib.Path(row["repo_path"]) / relative
 
 
+def _ensure_physical_path_inside_repo(physical: pathlib.Path, repo_path: pathlib.Path) -> None:
+    repo_root = pathlib.Path(repo_path).resolve()
+    resolved = physical.resolve()
+    try:
+        resolved.relative_to(repo_root)
+    except ValueError as exc:
+        raise ScopeError(
+            f"physical path escapes repository: {physical} -> {resolved}"
+        ) from exc
+    if any(part.is_symlink() for part in physical.parents):
+        raise ScopeError(f"symlinked path is not allowed: {physical}")
+
+
 def read_scoped_file(
     conn: sqlite3.Connection,
     token: str,
@@ -745,6 +758,7 @@ def read_scoped_file(
     if row is None:
         raise FileNotFoundError(f"indexed file not found: {file_path}")
     physical = _physical_file_path(row)
+    _ensure_physical_path_inside_repo(physical, pathlib.Path(row["repo_path"]))
     if not physical.is_file():
         raise FileNotFoundError(f"physical file missing: {physical}")
     try:

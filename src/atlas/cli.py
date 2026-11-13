@@ -297,6 +297,7 @@ def command_patch(args: argparse.Namespace) -> int:
         elif args.patch_command == "apply":
             result = apply_patch(
                 conn,
+                config,
                 args.patch_key,
                 applied_by=args.applied_by,
                 test_command=args.test_command,

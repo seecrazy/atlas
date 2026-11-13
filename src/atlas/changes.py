@@ -7,8 +7,10 @@ import hashlib
 import json
 import pathlib
 import shlex
+import shutil
 import sqlite3
 import subprocess
+import tempfile
 
 from .config import ProjectConfig
 from .db import audit, utcnow
@@ -37,6 +39,21 @@ def _physical_path(row: sqlite3.Row) -> pathlib.Path:
     return pathlib.Path(row["repo_path"]) / relative
 
 
+def _ensure_inside_repo(physical: pathlib.Path, repo_path: pathlib.Path) -> None:
+    repo_root = pathlib.Path(repo_path).resolve()
+    resolved = physical.resolve()
+    try:
+        resolved.relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError(f"target path escapes repository: {physical} -> {resolved}") from exc
+    _ensure_no_symlink_components(physical)
+
+
+def _ensure_no_symlink_components(physical: pathlib.Path) -> None:
+    if any(part.is_symlink() for part in physical.parents):
+        raise ValueError(f"symlinked path is not allowed: {physical}")
+
+
 def propose_patch(
     conn: sqlite3.Connection,
     config: ProjectConfig,
@@ -53,6 +70,7 @@ def propose_patch(
         raise ValueError("created_by must be non-empty")
     row = _file_row(conn, file_path)
     physical = _physical_path(row)
+    _ensure_inside_repo(physical, pathlib.Path(row["repo_path"]))
     if not physical.is_file():
         raise FileNotFoundError(f"physical file missing: {physical}")
     try:
@@ -124,6 +142,7 @@ def decide_patch(
 
 def apply_patch(
     conn: sqlite3.Connection,
+    config: ProjectConfig,
     patch_key: str,
     *,
     applied_by: str,
@@ -148,6 +167,11 @@ def apply_patch(
         raise ValueError("target text has changed; patch can no longer be applied safely")
     if test_command:
         command = shlex.split(test_command)
+        if test_command.strip() not in config.allowed_test_commands:
+            raise ValueError(
+                "test_command is not in config.allowed_test_commands; "
+                "add the exact command to project configuration"
+            )
         result = subprocess.run(command, cwd=str(physical.parent), capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
             raise RuntimeError(
@@ -271,25 +295,38 @@ def publish_patch(
     if patch is None or patch["status"] != "applied":
         raise ValueError("only applied patches can be published")
     target = _file_row(conn, patch["file_path"])
+    source_physical = _physical_path(target)
+    _ensure_inside_repo(source_physical, pathlib.Path(target["repo_path"]))
     repo_path = pathlib.Path(target["repo_path"])
     relative = str(target["path"]).replace(f"{target['repo_name']}/", "", 1)
-    current_branch = _git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"])
-    if current_branch != branch:
-        _git(repo_path, ["checkout", "-B", branch, base_branch])
-    _git(repo_path, ["add", "--", relative])
     commit_message = f"{title}\n\nATLAS patch: {patch_key}\nApproved by: {published_by}"
-    _git(repo_path, ["commit", "-m", commit_message])
     pushed = False
     pr_url = None
-    if push:
-        _git(repo_path, ["push", "-u", remote, branch], timeout=timeout)
-        pushed = True
-    if create_pr:
-        pr_url = _gh(
+    with tempfile.TemporaryDirectory(prefix="atlas-publish-") as temp:
+        worktree_path = pathlib.Path(temp) / "worktree"
+        _git(
             repo_path,
-            ["pr", "create", "--base", base_branch, "--head", branch, "--title", title, "--body", body or commit_message],
+            ["worktree", "add", "--detach", str(worktree_path), base_branch],
             timeout=timeout,
         )
+        try:
+            _git(worktree_path, ["checkout", "-B", branch, base_branch], timeout=timeout)
+            destination = worktree_path / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_physical, destination)
+            _git(worktree_path, ["add", "--", relative], timeout=timeout)
+            _git(worktree_path, ["commit", "-m", commit_message], timeout=timeout)
+            if push:
+                _git(worktree_path, ["push", "-u", remote, branch], timeout=timeout)
+                pushed = True
+            if create_pr:
+                pr_url = _gh(
+                    worktree_path,
+                    ["pr", "create", "--base", base_branch, "--head", branch, "--title", title, "--body", body or commit_message],
+                    timeout=timeout,
+                )
+        finally:
+            _git(repo_path, ["worktree", "remove", "--force", str(worktree_path)], timeout=timeout)
     audit(
         conn,
         "patch.published",
