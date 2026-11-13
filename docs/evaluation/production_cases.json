@@ -1,0 +1,33 @@
+{
+  "semantic": [
+    {
+      "scope": "agents.py",
+      "expected_terms": ["defines", "indexed", "symbols", "exported"]
+    },
+    {
+      "scope": "Repository atlas",
+      "expected_terms": ["Repository", "atlas", "indexed", "files"]
+    },
+    {
+      "scope": "Subsystem atlas-core",
+      "expected_terms": ["Subsystem", "atlas-core", "spans", "repositories", "atlas", "indexed", "files"]
+    }
+  ],
+  "agents": [
+    {
+      "question": "Read the implementation of run_layered_agents",
+      "expected_symbols": ["run_layered_agents"],
+      "expected_repo": "atlas"
+    },
+    {
+      "question": "Which callers reference rebuild_search_index?",
+      "expected_symbols": ["rebuild_search_index"],
+      "expected_repo": "atlas"
+    },
+    {
+      "question": "Which callers reference route_request?",
+      "expected_symbols": ["route_request"],
+      "expected_repo": "atlas"
+    }
+  ]
+}

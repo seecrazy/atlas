@@ -868,7 +868,12 @@ def _insert_file_record(conn: sqlite3.Connection, repo_id: int, record: FileReco
                 int(symbol.exported),
             ),
         )
+    seen_edges: set[tuple[str, int, str]] = set()
     for imported in record.imports:
+        edge = (imported["target"], imported["line"], imported["kind"])
+        if edge in seen_edges:
+            continue
+        seen_edges.add(edge)
         conn.execute(
             "INSERT INTO refs(source_file_id, source_repo_id, target_name, line, kind) VALUES(?,?,?,?,?)",
             (file_id, repo_id, imported["target"], imported["line"], imported["kind"]),
