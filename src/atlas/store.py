@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from .config import ProjectConfig
 from .db import audit, utcnow
+from .embeddings import vector_search
 
 
 DEFAULT_LIMIT = 50
@@ -168,6 +169,9 @@ def health(conn: sqlite3.Connection) -> dict:
             scalar("SELECT AVG(duration_ms) FROM run_metrics"), 3
         ),
         "p95_metric_duration_ms": _metric_p95(conn),
+        "embedding_count": scalar("SELECT COUNT(*) FROM embeddings"),
+        "embedding_model": "atlas-hash-v1",
+        "embedding_dimension": 128,
     }
 
 
@@ -292,6 +296,10 @@ def hybrid_search(
         ]
 
     now = datetime.now(timezone.utc)
+    vector_hits = {
+        (item["doc_type"], int(item["doc_id"])): item["similarity"]
+        for item in vector_search(conn, query, limit=limit * 5, min_similarity=0.02)
+    }
     results = []
     for row in rows:
         lexical = max(0.0, -float(row["lexical_rank"]))
@@ -303,7 +311,14 @@ def hybrid_search(
             updated = now
         age_days = max(0.0, (now - updated).total_seconds() / 86400)
         freshness = min(1.0, 1.0 / (1.0 + age_days / 30.0))
-        score = round(0.55 * normalized_lexical + 0.3 * type_weight + 0.15 * freshness, 4)
+        similarity = vector_hits.get((row["doc_type"], int(row["doc_id"])), 0.0)
+        score = round(
+            0.45 * normalized_lexical
+            + 0.20 * type_weight
+            + 0.10 * freshness
+            + 0.25 * similarity,
+            4,
+        )
         results.append(
             {
                 "doc_type": row["doc_type"],
@@ -317,6 +332,34 @@ def hybrid_search(
                 "score": score,
                 "freshness": round(freshness, 4),
                 "lexical_score": round(normalized_lexical, 4),
+                "vector_similarity": round(similarity, 4),
+            }
+        )
+    # Add pure vector-only hits so lexical misses still surface semantic matches.
+    existing_keys = {(item["doc_type"], int(item["doc_id"])) for item in results}
+    for (doc_type, doc_id), similarity in sorted(vector_hits.items(), key=lambda pair: pair[1], reverse=True):
+        if (doc_type, doc_id) in existing_keys or len(results) >= limit:
+            continue
+        row = conn.execute(
+            "SELECT title, body, path, repo, subsystem, updated_at FROM search_index WHERE doc_type=? AND doc_id=? LIMIT 1",
+            (doc_type, doc_id),
+        ).fetchone()
+        if row is None:
+            continue
+        results.append(
+            {
+                "doc_type": doc_type,
+                "doc_id": doc_id,
+                "title": row["title"],
+                "summary": row["body"][:500],
+                "path": row["path"],
+                "repo": row["repo"],
+                "subsystem": row["subsystem"],
+                "updated_at": row["updated_at"],
+                "score": round(0.35 * similarity + 0.65 * similarity, 4),
+                "freshness": 0.5,
+                "lexical_score": 0.0,
+                "vector_similarity": round(similarity, 4),
             }
         )
     return sorted(results, key=lambda item: item["score"], reverse=True)[:limit]
@@ -848,6 +891,13 @@ def memories(
             """,
             (row["id"],),
         ).fetchall()
+        fields = {
+            item["field_name"]: json.loads(item["value_json"])
+            for item in conn.execute(
+                "SELECT field_name, value_json FROM memory_fields WHERE memory_id = ? ORDER BY field_name",
+                (row["id"],),
+            ).fetchall()
+        }
         result.append(
             {
                 "id": row["id"],
@@ -858,6 +908,7 @@ def memories(
                 "confidence": row["confidence"],
                 "utility_score": row["utility_score"],
                 "updated_at": row["updated_at"],
+                "fields": fields,
                 "evidence": [
                     {
                         "repo": item["repo"],

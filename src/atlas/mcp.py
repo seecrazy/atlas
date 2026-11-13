@@ -38,6 +38,7 @@ from .kernel import list_approvals, decide_approval
 from .changes import propose_patch, decide_patch, apply_patch, list_patches, propose_publication, publish_patch
 from .evolution import distill_strategy_rules, evaluate_variant, list_variants, propose_promotion, promote_variant, propose_rollback, rollback_variant
 from .evaluation import run_production_evaluation
+from .embeddings import rebuild_embeddings, vector_search
 from .kernel import Budget
 from .operations import new_trace_id, record_metric
 
@@ -528,6 +529,25 @@ TOOLS = [
         },
     },
     {
+        "name": "atlas_rebuild_embeddings",
+        "description": "Rebuild local vector embeddings for symbols, memories, contracts, and docs.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "atlas_vector_search",
+        "description": "Search using local hashed vector similarity.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "min_similarity": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "atlas_hybrid_search",
         "description": "Use SQLite FTS5 hybrid ranking over symbols, memories, contracts, and docs.",
         "inputSchema": {
@@ -796,6 +816,15 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             args["query"],
             limit=args.get("limit"),
             actor="mcp",
+        )
+    if name == "atlas_rebuild_embeddings":
+        return rebuild_embeddings(conn)
+    if name == "atlas_vector_search":
+        return vector_search(
+            conn,
+            args["query"],
+            limit=args.get("limit"),
+            min_similarity=args.get("min_similarity", 0.05),
         )
     if name == "atlas_hybrid_search":
         return hybrid_search(conn, args["query"], limit=args.get("limit"))

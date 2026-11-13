@@ -14,12 +14,31 @@ from .config import ProjectConfig
 from .db import audit, connect, utcnow
 from .llm import LLMProvider, LLMUnavailable
 from .kernel import Budget
+from .embeddings import MODEL, DIMENSION, rebuild_embeddings
 from .store import rebuild_search_index
 
 
 def _memory_key(scope_type: str, scope_key: str) -> str:
     raw = f"{scope_type}:{scope_key}"
     return f"mem-{scope_type}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _set_memory_fields(
+    conn: sqlite3.Connection,
+    memory_id: int,
+    fields: dict,
+) -> None:
+    now = utcnow()
+    for field_name, value in fields.items():
+        conn.execute(
+            """
+            INSERT INTO memory_fields(memory_id, field_name, value_json, created_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(memory_id, field_name) DO UPDATE SET
+              value_json=excluded.value_json, created_at=excluded.created_at
+            """,
+            (memory_id, field_name, json.dumps(value, ensure_ascii=False, sort_keys=True), now),
+        )
 
 
 def _upsert_memory(
@@ -31,6 +50,7 @@ def _upsert_memory(
     evidence: list[dict],
     confidence: float,
     source: str = "semantic-generator",
+    fields: dict | None = None,
 ) -> str:
     key = _memory_key(scope_type, scope_key)
     now = utcnow()
@@ -147,6 +167,17 @@ def generate_semantic_memories(
             }],
             confidence=0.72,
             source=provider_name,
+            fields={
+                "entity_type": "file",
+                "entity_key": row["path"],
+                "language": row["language"],
+                "repo": row["repo"],
+                "subsystem": row["subsystem"],
+                "module": row["module_name"],
+                "symbol_count": len(symbol_rows),
+                "exported_symbols": exported,
+                "imports": imports,
+            },
         )
         generation_key = f"file:{hashlib.sha256(row['path'].encode()).hexdigest()[:16]}"
         conn.execute(
@@ -177,6 +208,13 @@ def generate_semantic_memories(
             claim=claim,
             evidence=[{"file_id": rows[0]["id"], "start_line": 1, "end_line": 1}],
             confidence=0.78,
+            fields={
+                "entity_type": "repo",
+                "entity_key": repo,
+                "file_count": len(rows),
+                "languages": sorted({item["language"] for item in rows}),
+                "modules": sorted({item["module_name"] for item in rows})[:100],
+            },
         )
         generated.append({"scope": repo, "memory_key": memory_key, "provider": "deterministic"})
     for subsystem, rows in grouped_subsystem.items():
@@ -190,11 +228,19 @@ def generate_semantic_memories(
             claim=claim,
             evidence=[{"file_id": rows[0]["id"], "start_line": 1, "end_line": 1}],
             confidence=0.82,
+            fields={
+                "entity_type": "subsystem",
+                "entity_key": subsystem,
+                "repos": repos,
+                "file_count": len(rows),
+                "languages": sorted({item["language"] for item in rows}),
+            },
         )
         generated.append({"scope": subsystem, "memory_key": memory_key, "provider": "deterministic"})
 
     audit(conn, "memory.generated", {"count": len(generated), "scope": scope})
     rebuild_search_index(conn)
+    rebuild_embeddings(conn)
     conn.commit()
     return {"generated": generated, "count": len(generated), "budget": budget.usage()}
 
@@ -300,6 +346,7 @@ def extract_revert_lessons(conn: sqlite3.Connection, config: ProjectConfig, *, l
             lessons.append({"repo": repo_row["name"], "commit": commit, "memory_key": memory_key})
     audit(conn, "memory.lessons_extracted", {"count": len(lessons)})
     rebuild_search_index(conn)
+    rebuild_embeddings(conn)
     conn.commit()
     return {"lessons": lessons, "count": len(lessons)}
 

@@ -24,6 +24,7 @@ from .changes import propose_patch, decide_patch, apply_patch, list_patches, pro
 from .evolution import distill_strategy_rules, create_variant, evaluate_variant, list_variants, propose_promotion, promote_variant, propose_rollback, rollback_variant
 from .evaluation import run_production_evaluation
 from .operations import doctor, prune_audit_events
+from .embeddings import rebuild_embeddings, vector_search
 from .evolution import decay_strategy_utility, shadow_evaluate
 from .daemon import run_watch_daemon
 
@@ -167,6 +168,26 @@ def command_search(args: argparse.Namespace) -> int:
             from .store import search
 
             result = search(conn, args.query, limit=args.limit)
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_search_embeddings(args: argparse.Namespace) -> int:
+    rebuild = getattr(args, "rebuild", False)
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if rebuild:
+            result = rebuild_embeddings(conn)
+        else:
+            result = vector_search(
+                conn,
+                args.query,
+                limit=args.limit,
+                min_similarity=args.min_similarity,
+            )
     finally:
         conn.close()
     print_json(result)
@@ -516,6 +537,18 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--no-llm", action="store_true")
     evaluate_parser.add_argument("--no-record", action="store_true")
     evaluate_parser.set_defaults(handler=command_evaluate)
+
+    embedding_parser = commands.add_parser("embed", help="build or query local vector embeddings")
+    embedding_sub = embedding_parser.add_subparsers(dest="embedding_command", required=True)
+    embedding_rebuild = embedding_sub.add_parser("rebuild")
+    embedding_rebuild.add_argument("project_root", nargs="?", default=".")
+    embedding_rebuild.set_defaults(handler=command_search_embeddings, rebuild=True, query="", limit=50, min_similarity=0.05)
+    embedding_search = embedding_sub.add_parser("search")
+    embedding_search.add_argument("project_root", nargs="?", default=".")
+    embedding_search.add_argument("query")
+    embedding_search.add_argument("--limit", type=int, default=50)
+    embedding_search.add_argument("--min-similarity", type=float, default=0.05)
+    embedding_search.set_defaults(handler=command_search_embeddings)
 
     daemon_parser = commands.add_parser("daemon", help="run foreground incremental indexing")
     daemon_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")

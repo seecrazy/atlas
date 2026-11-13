@@ -14,6 +14,7 @@ from dataclasses import replace
 
 from .config import ProjectConfig
 from .db import audit, connect, utcnow
+from .embeddings import rebuild_embeddings
 from .store import rebuild_search_index
 from .tree_backend import extract_with_tree_sitter, tree_sitter_available
 
@@ -1331,6 +1332,7 @@ def index_project(
         audit(conn, "index.completed", stats)
         audit(conn, "references.resolved", reference_resolution)
         stats["search_index_documents"] = rebuild_search_index(conn)
+        stats["embedding_documents"] = rebuild_embeddings(conn)["indexed"]
         conn.commit()
     finally:
         conn.close()

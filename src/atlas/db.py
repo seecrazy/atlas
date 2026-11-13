@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -290,6 +290,30 @@ CREATE INDEX IF NOT EXISTS idx_metrics_trace ON run_metrics(trace_id);
 CREATE INDEX IF NOT EXISTS idx_metrics_created ON run_metrics(created_at);
 CREATE INDEX IF NOT EXISTS idx_metrics_type ON run_metrics(event_type, created_at);
 
+CREATE TABLE IF NOT EXISTS memory_fields (
+  id INTEGER PRIMARY KEY,
+  memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  field_name TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(memory_id, field_name)
+);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+  id INTEGER PRIMARY KEY,
+  object_type TEXT NOT NULL,
+  object_id INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  dimension INTEGER NOT NULL,
+  vector_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(object_type, object_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_fields_memory ON memory_fields(memory_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_object ON embeddings(object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
   title, body, path, repo, subsystem, doc_type UNINDEXED, doc_id UNINDEXED, updated_at UNINDEXED
 );
@@ -473,6 +497,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_metrics_trace ON run_metrics(trace_id);
         CREATE INDEX IF NOT EXISTS idx_metrics_created ON run_metrics(created_at);
         CREATE INDEX IF NOT EXISTS idx_metrics_type ON run_metrics(event_type, created_at);
+        CREATE TABLE IF NOT EXISTS memory_fields (
+          id INTEGER PRIMARY KEY,
+          memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+          field_name TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(memory_id, field_name)
+        );
+        CREATE TABLE IF NOT EXISTS embeddings (
+          id INTEGER PRIMARY KEY,
+          object_type TEXT NOT NULL,
+          object_id INTEGER NOT NULL,
+          model TEXT NOT NULL,
+          dimension INTEGER NOT NULL,
+          vector_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(object_type, object_id, model)
+        );
         """
     )
     if "symbols" in {
