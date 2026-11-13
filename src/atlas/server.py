@@ -13,7 +13,7 @@ from .mcp import McpServer
 
 
 class AtlasHTTPHandler(BaseHTTPRequestHandler):
-    server_version = "ATLAS/0.1"
+    server_version = "ATLAS/0.2"
     max_body_bytes = 1_000_000
     requests_per_minute = 240
 

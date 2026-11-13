@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from .config import ProjectConfig
+from . import __version__
 from .db import connect
 from .context import developer_context, module_context, system_context
 from .store import (
@@ -928,7 +929,7 @@ class McpServer:
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "atlas",
-                        "version": "0.1.0",
+                        "version": __version__,
                     },
                 },
             }
