@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -210,6 +210,26 @@ CREATE TABLE IF NOT EXISTS evolution_variants (
   evaluated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS run_metrics (
+  id INTEGER PRIMARY KEY,
+  trace_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT 'atlas',
+  status TEXT NOT NULL DEFAULT 'completed',
+  duration_ms REAL NOT NULL DEFAULT 0,
+  result_count INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daemon_locks (
+  lock_key TEXT PRIMARY KEY,
+  pid INTEGER NOT NULL,
+  host TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scope_tokens (
   id INTEGER PRIMARY KEY,
   token TEXT NOT NULL UNIQUE,
@@ -266,6 +286,9 @@ CREATE INDEX IF NOT EXISTS idx_contracts_name ON contracts(name);
 CREATE INDEX IF NOT EXISTS idx_architecture_docs_kind ON architecture_docs(kind, path);
 CREATE INDEX IF NOT EXISTS idx_strategy_rules_pattern ON strategy_rules(pattern);
 CREATE INDEX IF NOT EXISTS idx_evolution_status ON evolution_variants(status, score);
+CREATE INDEX IF NOT EXISTS idx_metrics_trace ON run_metrics(trace_id);
+CREATE INDEX IF NOT EXISTS idx_metrics_created ON run_metrics(created_at);
+CREATE INDEX IF NOT EXISTS idx_metrics_type ON run_metrics(event_type, created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
   title, body, path, repo, subsystem, doc_type UNINDEXED, doc_id UNINDEXED, updated_at UNINDEXED
@@ -389,6 +412,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
           created_at TEXT NOT NULL,
           evaluated_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS run_metrics (
+          id INTEGER PRIMARY KEY,
+          trace_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor TEXT NOT NULL DEFAULT 'atlas',
+          status TEXT NOT NULL DEFAULT 'completed',
+          duration_ms REAL NOT NULL DEFAULT 0,
+          result_count INTEGER NOT NULL DEFAULT 0,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS daemon_locks (
+          lock_key TEXT PRIMARY KEY,
+          pid INTEGER NOT NULL,
+          host TEXT NOT NULL,
+          acquired_at TEXT NOT NULL,
+          heartbeat_at TEXT NOT NULL
+        );
         """
     )
     conn.execute(
@@ -426,6 +467,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_memory_reviews_memory ON memory_reviews(memory_id)"
+    )
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_metrics_trace ON run_metrics(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_metrics_created ON run_metrics(created_at);
+        CREATE INDEX IF NOT EXISTS idx_metrics_type ON run_metrics(event_type, created_at);
+        """
     )
     if "symbols" in {
         row["name"]

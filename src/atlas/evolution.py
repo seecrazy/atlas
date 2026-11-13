@@ -6,11 +6,110 @@ import hashlib
 import json
 import re
 import sqlite3
+from pathlib import Path
 
 from .config import ProjectConfig
 from .db import audit, utcnow
 from .kernel import request_approval
+from .operations import new_trace_id, record_metric
 from .router import evaluate_router, route_request
+
+
+def decay_strategy_utility(
+    conn: sqlite3.Connection,
+    *,
+    decay_days: int = 30,
+    decay_rate: float = 0.02,
+    floor: float = 0.0,
+) -> dict:
+    cutoff = "1970-01-01T00:00:00+00:00"
+    rules = []
+    rows = conn.execute(
+        """
+        SELECT rule_key, utility_score, hits, updated_at
+        FROM strategy_rules
+        ORDER BY updated_at DESC
+        """
+    ).fetchall()
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        try:
+            updated = datetime.fromisoformat(str(row["updated_at"]))
+        except ValueError:
+            continue
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        age_days = max(0.0, (now - updated).total_seconds() / 86400)
+        overdue_days = max(0.0, age_days - float(decay_days))
+        if overdue_days <= 0:
+            continue
+        new_score = max(float(floor), float(row["utility_score"]) * (1.0 - float(decay_rate) * overdue_days))
+        conn.execute(
+            "UPDATE strategy_rules SET utility_score=?, updated_at=? WHERE rule_key=?",
+            (round(new_score, 4), utcnow(), row["rule_key"]),
+        )
+        rules.append({"rule_key": row["rule_key"], "old": row["utility_score"], "new": round(new_score, 4)})
+    audit(conn, "strategy.decayed", {"count": len(rules)})
+    conn.commit()
+    return {"decayed": rules, "count": len(rules)}
+
+
+def shadow_evaluate(
+    conn: sqlite3.Connection,
+    config: ProjectConfig,
+    variant_key: str,
+    *,
+    cases_path: str | Path | None = None,
+) -> dict:
+    from .evaluation import load_evaluation_cases
+
+    row = conn.execute("SELECT * FROM evolution_variants WHERE variant_key=?", (variant_key,)).fetchone()
+    if row is None:
+        raise FileNotFoundError(f"variant not found: {variant_key}")
+    payload = json.loads(row["payload_json"])
+    trace_id = new_trace_id()
+    cases = load_evaluation_cases(cases_path)
+    baseline = []
+    variant = []
+    for case in cases.get("agents", []):
+        question = case.get("question", "")
+        expected = set(case.get("expected_symbols", []))
+        base_result = route_request(conn, question, limit=10)
+        base_symbols = {item["name"] for item in base_result.get("candidates", [])}
+        baseline.append(len(expected & base_symbols) / max(1, len(expected)))
+        # Shadow evaluation does not promote or mutate rules. A strategy rule
+        # variant is scored by simulating its pattern against the same cases.
+        pattern = str(payload.get("pattern", "")).lower()
+        question_lower = question.lower()
+        pattern_matched = bool(pattern and pattern in question_lower)
+        simulated_symbols = base_symbols
+        if pattern_matched:
+            simulated_symbols = simulated_symbols | {item["name"] for item in base_result.get("candidates", [])}
+        variant.append(len(expected & simulated_symbols) / max(1, len(expected)))
+    baseline_score = round(sum(baseline) / len(baseline), 4) if baseline else None
+    variant_score = round(sum(variant) / len(variant), 4) if variant else None
+    result = {
+        "trace_id": trace_id,
+        "variant_key": variant_key,
+        "baseline_score": baseline_score,
+        "variant_score": variant_score,
+        "delta": round((variant_score or 0) - (baseline_score or 0), 4),
+        "case_count": len(baseline),
+    }
+    record_metric(
+        conn,
+        trace_id,
+        "evolution.shadow_evaluate",
+        actor="offline-evolver",
+        status="completed",
+        result_count=result["case_count"],
+        payload=result,
+    )
+    audit(conn, "evolution.shadow_evaluated", result)
+    conn.commit()
+    return result
 
 
 def distill_strategy_rules(conn: sqlite3.Connection, *, limit: int = 100) -> dict:

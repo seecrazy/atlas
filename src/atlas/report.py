@@ -58,6 +58,11 @@ def health_report(report: dict) -> str:
         f"- Agent runs: `{report['agent_run_count']}`",
         f"- Strategy rules: `{report['strategy_rule_count']}`",
         f"- Accepted variants: `{report['accepted_variant_count']}`",
+        f"- Unresolved reference ratio: `{report['unresolved_reference_ratio']}`",
+        f"- Stale memory ratio: `{report['stale_memory_ratio']}`",
+        f"- Run metrics p95 ms: `{report['p95_metric_duration_ms']}`",
+        f"- Last index: `{report['last_index_at']}`",
+        f"- Last daemon cycle: `{report['last_daemon_cycle_at']}`",
         "",
         "## Language coverage",
         "",
@@ -116,6 +121,11 @@ def health_report(report: dict) -> str:
             f"- Failed agent runs: `{report['failed_agent_run_count']}`",
             f"- Strategy rules: `{report['strategy_rule_count']}`",
             f"- Accepted variants: `{report['accepted_variant_count']}`",
+            f"- Unresolved reference ratio: `{report['unresolved_reference_ratio']}`",
+            f"- Stale memory ratio: `{report['stale_memory_ratio']}`",
+            f"- Run metrics p95 ms: `{report['p95_metric_duration_ms']}`",
+            f"- Last index: `{report['last_index_at']}`",
+            f"- Last daemon cycle: `{report['last_daemon_cycle_at']}`",
         ]
     )
 

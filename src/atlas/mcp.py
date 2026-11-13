@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from typing import Any
 
 from .config import ProjectConfig
@@ -37,6 +38,8 @@ from .kernel import list_approvals, decide_approval
 from .changes import propose_patch, decide_patch, apply_patch, list_patches, propose_publication, publish_patch
 from .evolution import distill_strategy_rules, evaluate_variant, list_variants, propose_promotion, promote_variant, propose_rollback, rollback_variant
 from .evaluation import run_production_evaluation
+from .kernel import Budget
+from .operations import new_trace_id, record_metric
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -745,6 +748,7 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
     if name == "atlas_pipeline":
         return run_pipeline(
             conn,
+            config,
             args["question"],
             min_confidence=args.get("min_confidence", 0.65),
             limit=args.get("limit", 50),
@@ -954,6 +958,7 @@ class McpServer:
     def __init__(self, config: ProjectConfig) -> None:
         self.config = config
         self.conn = connect(config.db_path)
+        self.budget = Budget.from_config(config)
 
     def close(self) -> None:
         self.conn.close()
@@ -985,9 +990,13 @@ class McpServer:
             params = message.get("params") or {}
             tool_name = params.get("name")
             tool_args = params.get("arguments") or {}
+            trace_id = new_trace_id()
+            started = time.perf_counter()
+            status = "completed"
             try:
                 if not isinstance(tool_args, dict):
                     raise ValueError("tool arguments must be an object")
+                self.budget.spend(calls=1, tokens=max(1, len(json.dumps(tool_args)) // 4))
                 payload = _dispatch_tool(self.conn, self.config, tool_name, tool_args)
                 return {"jsonrpc": "2.0", "id": request_id, "result": _text_result(payload)}
             except ScopeError as exc:
@@ -1003,11 +1012,24 @@ class McpServer:
                     "result": _error_result(str(exc)),
                 }
             except Exception as exc:  # MCP must stay alive for subsequent requests.
+                status = "failed"
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": _error_result(f"internal tool error: {exc}"),
                 }
+            finally:
+                record_metric(
+                    self.conn,
+                    trace_id,
+                    f"mcp.{tool_name}",
+                    actor="mcp",
+                    status=status,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    result_count=0,
+                    payload={"arguments": tool_args},
+                )
+                self.conn.commit()
 
         if request_id is not None:
             return {

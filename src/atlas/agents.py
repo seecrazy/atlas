@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import sqlite3
 
 from .config import ProjectConfig
@@ -11,6 +12,7 @@ from .context import developer_context, module_context, system_context
 from .db import audit, utcnow
 from .kernel import Budget, private_score, verify_finding
 from .llm import LLMProvider, LLMUnavailable
+from .operations import new_trace_id, record_metric
 from .router import route_request
 from .store import create_scope, read_scoped_file
 from .synthesis import converge_findings
@@ -62,6 +64,9 @@ def run_layered_agents(
         raise ValueError("question must be non-empty")
     run_key = _run_key(question)
     budget = Budget.from_config(config)
+    trace_id = new_trace_id()
+    started = time.perf_counter()
+    status = "completed"
     conn.execute(
         "INSERT INTO agent_runs(run_key, question, status, budget_json, created_at) VALUES(?,?,?,?,?)",
         (run_key, question, "running", json.dumps(config.budgets, sort_keys=True), utcnow()),
@@ -190,6 +195,7 @@ def run_layered_agents(
             convergence = None
 
         result = {
+            "trace_id": trace_id,
             "run_key": run_key,
             "question": question,
             "route": route,
@@ -214,6 +220,16 @@ def run_layered_agents(
             ),
         )
         audit(conn, "agent.run.completed", {"run_key": run_key, "score": result["private_score"]})
+        record_metric(
+            conn,
+            trace_id,
+            "agent.run",
+            actor="layered-agent",
+            status=status,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            result_count=len(findings),
+            payload={"run_key": run_key, "intent": route["intent"], "role": route["role"]},
+        )
         conn.commit()
         return result
     except Exception as exc:
@@ -225,5 +241,15 @@ def run_layered_agents(
             (json.dumps(budget.usage(), sort_keys=True), str(exc), utcnow(), run_key),
         )
         audit(conn, "agent.run.failed", {"run_key": run_key, "error": str(exc)})
+        record_metric(
+            conn,
+            trace_id,
+            "agent.run",
+            actor="layered-agent",
+            status=status,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            result_count=len(findings),
+            payload={"run_key": run_key, "error": str(exc)},
+        )
         conn.commit()
         raise

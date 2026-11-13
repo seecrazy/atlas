@@ -23,6 +23,8 @@ from .kernel import list_approvals, decide_approval
 from .changes import propose_patch, decide_patch, apply_patch, list_patches, propose_publication, publish_patch
 from .evolution import distill_strategy_rules, create_variant, evaluate_variant, list_variants, propose_promotion, promote_variant, propose_rollback, rollback_variant
 from .evaluation import run_production_evaluation
+from .operations import doctor, prune_audit_events
+from .evolution import decay_strategy_utility, shadow_evaluate
 from .daemon import run_watch_daemon
 
 
@@ -105,6 +107,7 @@ def command_run(args: argparse.Namespace) -> int:
     try:
         result = run_pipeline(
             conn,
+            config,
             args.question,
             min_confidence=args.min_confidence,
             limit=args.limit,
@@ -381,6 +384,20 @@ def command_evolution(args: argparse.Namespace) -> int:
                 approval_key=args.approval_key,
                 rolled_back_by=args.rolled_back_by,
             )
+        elif args.evolution_command == "shadow":
+            result = shadow_evaluate(
+                conn,
+                config,
+                args.variant_key,
+                cases_path=args.cases,
+            )
+        elif args.evolution_command == "decay":
+            result = decay_strategy_utility(
+                conn,
+                decay_days=args.decay_days,
+                decay_rate=args.decay_rate,
+                floor=args.floor,
+            )
         else:
             raise ValueError("unknown evolution action")
     finally:
@@ -393,6 +410,30 @@ def command_serve_http(args: argparse.Namespace) -> int:
     from .server import run_http_server
 
     run_http_server(args.project_root, args.host, args.port)
+    return 0
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    print_json(doctor(config))
+    return 0
+
+
+def command_maintenance(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.maintenance_command == "prune":
+            result = prune_audit_events(
+                conn,
+                retention_days=args.retention_days,
+                max_events=args.max_events,
+            )
+        else:
+            raise ValueError("unknown maintenance action")
+    finally:
+        conn.close()
+    print_json(result)
     return 0
 
 
@@ -646,6 +687,29 @@ def build_parser() -> argparse.ArgumentParser:
     evolution_rollback.add_argument("--approval-key", required=True)
     evolution_rollback.add_argument("--rolled-back-by", required=True)
     evolution_rollback.set_defaults(handler=command_evolution)
+    evolution_shadow = evolution_sub.add_parser("shadow")
+    evolution_shadow.add_argument("project_root", nargs="?", default=".")
+    evolution_shadow.add_argument("variant_key")
+    evolution_shadow.add_argument("--cases")
+    evolution_shadow.set_defaults(handler=command_evolution)
+    evolution_decay = evolution_sub.add_parser("decay")
+    evolution_decay.add_argument("project_root", nargs="?", default=".")
+    evolution_decay.add_argument("--decay-days", type=int, default=30)
+    evolution_decay.add_argument("--decay-rate", type=float, default=0.02)
+    evolution_decay.add_argument("--floor", type=float, default=0.0)
+    evolution_decay.set_defaults(handler=command_evolution)
+
+    maintenance_parser = commands.add_parser("maintenance", help="operational maintenance")
+    maintenance_sub = maintenance_parser.add_subparsers(dest="maintenance_command", required=True)
+    maintenance_prune = maintenance_sub.add_parser("prune")
+    maintenance_prune.add_argument("project_root", nargs="?", default=".")
+    maintenance_prune.add_argument("--retention-days", type=int, default=90)
+    maintenance_prune.add_argument("--max-events", type=int, default=200000)
+    maintenance_prune.set_defaults(handler=command_maintenance)
+
+    doctor_parser = commands.add_parser("doctor", help="check runtime dependencies and database health")
+    doctor_parser.add_argument("project_root", nargs="?", default=".")
+    doctor_parser.set_defaults(handler=command_doctor)
 
     http_parser = commands.add_parser("serve-http", help="run HTTP JSON-RPC server")
     http_parser.add_argument("project_root", nargs="?", default=".")

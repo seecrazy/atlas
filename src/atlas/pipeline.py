@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 
 from .context import developer_context, module_context, system_context
+from .kernel import Budget
 from .db import audit
+from .kernel import Budget
 from .router import route_request
 from .store import impact_chain, memories
 from .synthesis import converge_findings
+from .config import ProjectConfig
+
+
+def _load_config(config: ProjectConfig):
+    return config
+from .operations import new_trace_id, record_metric
 
 
 def _fallback_file(conn: sqlite3.Connection) -> dict:
@@ -171,54 +180,81 @@ def _worker_findings(route: dict, candidate: dict, contexts: dict) -> list[dict]
 
 def run_pipeline(
     conn: sqlite3.Connection,
+    config: ProjectConfig,
     question: str,
     *,
     min_confidence: float = 0.65,
     limit: int = 50,
 ) -> dict:
-    route = route_request(conn, question, limit=min(limit, 10))
-    candidate = _candidate_file(route, conn)
-    contexts = _build_contexts(
-        conn,
-        route,
-        candidate,
-        min_confidence=min_confidence,
-        limit=limit,
-    )
-    findings = _worker_findings(route, candidate, contexts)
-    warnings = list(route.get("warnings", []))
-    convergence = None
-    if findings:
-        impact_symbol = candidate.get("name") if route["intent"] == "impact" else None
-        convergence = converge_findings(
+    trace_id = new_trace_id()
+    budget = Budget.from_config(config)
+    started = time.perf_counter()
+    status = "completed"
+    try:
+        budget.spend(calls=1)
+        route = route_request(conn, question, limit=min(limit, 10))
+        budget.spend(calls=1)
+        candidate = _candidate_file(route, conn)
+        budget.spend(calls=1)
+        contexts = _build_contexts(
             conn,
-            question,
-            findings,
-            route=route,
-            impact_symbol=impact_symbol,
+            route,
+            candidate,
             min_confidence=min_confidence,
             limit=limit,
         )
-    else:
-        warnings.append("no structural worker findings; pipeline cannot converge")
-    result = {
-        "question": question.strip(),
-        "route": route,
-        "contexts": contexts,
-        "workers": {"findings": findings},
-        "convergence": convergence,
-        "warnings": warnings,
-    }
-    audit(
-        conn,
-        "pipeline.run",
-        {
-            "intent": route["intent"],
-            "role": route["role"],
-            "finding_count": len(findings),
-            "converged": convergence is not None,
-        },
-        actor="deterministic-pipeline",
-    )
-    conn.commit()
-    return result
+        findings = _worker_findings(route, candidate, contexts)
+        warnings = list(route.get("warnings", []))
+        convergence = None
+        if findings:
+            budget.spend(calls=1)
+            impact_symbol = candidate.get("name") if route["intent"] == "impact" else None
+            convergence = converge_findings(
+                conn,
+                question,
+                findings,
+                route=route,
+                impact_symbol=impact_symbol,
+                min_confidence=min_confidence,
+                limit=limit,
+            )
+        else:
+            warnings.append("no structural worker findings; pipeline cannot converge")
+        result = {
+            "trace_id": trace_id,
+            "question": question.strip(),
+            "route": route,
+            "contexts": contexts,
+            "workers": {"findings": findings},
+            "convergence": convergence,
+            "warnings": warnings,
+            "budget": budget.usage(),
+        }
+        audit(
+            conn,
+            "pipeline.run",
+            {
+                "trace_id": trace_id,
+                "intent": route["intent"],
+                "role": route["role"],
+                "finding_count": len(findings),
+                "converged": convergence is not None,
+            },
+            actor="deterministic-pipeline",
+        )
+        return result
+    except Exception:
+        status = "failed"
+        raise
+    finally:
+        record_metric(
+            conn,
+            trace_id,
+            "pipeline.run",
+            actor="deterministic-pipeline",
+            status=status,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            result_count=len(result.get("workers", {}).get("findings", [])) if "result" in locals() else 0,
+            payload={"question": question.strip()},
+        )
+        conn.commit()

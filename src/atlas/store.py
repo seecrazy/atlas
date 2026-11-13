@@ -61,6 +61,16 @@ def _latest_router_validation(conn: sqlite3.Connection) -> dict | None:
     return {**payload, "validated_at": row["created_at"]}
 
 
+def _metric_p95(conn: sqlite3.Connection) -> float | None:
+    rows = conn.execute(
+        "SELECT duration_ms FROM run_metrics ORDER BY duration_ms"
+    ).fetchall()
+    if not rows:
+        return None
+    index = max(0, min(len(rows) - 1, int((len(rows) - 1) * 0.95)))
+    return round(float(rows[index]["duration_ms"]), 3)
+
+
 def health(conn: sqlite3.Connection) -> dict:
     def scalar(sql: str) -> int:
         row = conn.execute(sql).fetchone()
@@ -135,6 +145,29 @@ def health(conn: sqlite3.Connection) -> dict:
         "failed_agent_run_count": scalar("SELECT COUNT(*) FROM agent_runs WHERE status = 'failed'"),
         "strategy_rule_count": scalar("SELECT COUNT(*) FROM strategy_rules"),
         "accepted_variant_count": scalar("SELECT COUNT(*) FROM evolution_variants WHERE status = 'accepted'"),
+        "unresolved_reference_ratio": round(
+            scalar("SELECT COUNT(*) FROM refs WHERE resolution_status = 'unresolved'")
+            / max(1, scalar("SELECT COUNT(*) FROM refs")),
+            4,
+        ),
+        "stale_memory_ratio": round(
+            scalar("SELECT COUNT(*) FROM memories WHERE status = 'stale'")
+            / max(1, scalar("SELECT COUNT(*) FROM memories")),
+            4,
+        ),
+        "audit_event_count": scalar("SELECT COUNT(*) FROM audit_events"),
+        "run_metric_count": scalar("SELECT COUNT(*) FROM run_metrics"),
+        "failed_run_metric_count": scalar("SELECT COUNT(*) FROM run_metrics WHERE status = 'failed'"),
+        "last_index_at": (
+            conn.execute("SELECT MAX(last_indexed_at) AS value FROM index_state").fetchone()["value"]
+        ),
+        "last_daemon_cycle_at": (
+            conn.execute("SELECT MAX(created_at) AS value FROM run_metrics WHERE event_type LIKE 'daemon.%'").fetchone()["value"]
+        ),
+        "average_metric_duration_ms": round(
+            scalar("SELECT AVG(duration_ms) FROM run_metrics"), 3
+        ),
+        "p95_metric_duration_ms": _metric_p95(conn),
     }
 
 

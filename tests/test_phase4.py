@@ -75,6 +75,7 @@ def test_pipeline_route_context_worker_convergence(project_root):
     try:
         result = run_pipeline(
             conn,
+            config,
             "Which callers reference RetryClient?",
             min_confidence=0.65,
         )
@@ -97,7 +98,7 @@ def test_pipeline_warns_without_findings(tmp_path):
     index_project(config, full=True)
     conn = connect(config.db_path)
     try:
-        result = run_pipeline(conn, "What is the architecture contract for payment?")
+        result = run_pipeline(conn, config, "What is the architecture contract for payment?")
         assert result["route"]["intent"] == "locate"
         assert "no structural worker findings; pipeline cannot converge" in result["warnings"]
         assert result["convergence"] is None
