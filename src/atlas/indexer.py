@@ -14,6 +14,8 @@ from dataclasses import replace
 
 from .config import ProjectConfig
 from .db import audit, connect, utcnow
+from .store import rebuild_search_index
+from .tree_backend import extract_with_tree_sitter, tree_sitter_available
 
 
 LANGUAGE_EXTENSIONS = {
@@ -607,12 +609,21 @@ def extract_rust(path: pathlib.Path, module_name: str) -> tuple[FileRecord, byte
     ), content
 
 
-def scan_file(path: pathlib.Path, display_path: pathlib.Path | None = None) -> FileRecord | None:
+def scan_file(
+    path: pathlib.Path,
+    display_path: pathlib.Path | None = None,
+    *,
+    parser_backend: str = "auto",
+) -> FileRecord | None:
     language = LANGUAGE_EXTENSIONS.get(path.suffix.lower())
     if language not in {"python", "typescript", "javascript", "go", "java", "rust"}:
         return None
     display_path = display_path or path
     module_name = module_name_from_path(display_path)
+    if parser_backend in {"auto", "tree-sitter"} and tree_sitter_available():
+        ts_record = extract_with_tree_sitter(path, module_name, language)
+        if ts_record is not None:
+            return replace(ts_record, path=display_path.as_posix())
     if language == "python":
         record, _ = extract_python(path, module_name)
         return replace(record, path=display_path.as_posix())
@@ -639,7 +650,14 @@ def scan_repo(repo_dir: pathlib.Path, project_config: ProjectConfig) -> list[Fil
         return records
     max_workers = max(1, min(int(project_config.max_workers), len(paths)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for record in executor.map(lambda path: scan_file(path, path.relative_to(repo_dir)), paths):
+        for record in executor.map(
+            lambda path: scan_file(
+                path,
+                path.relative_to(repo_dir),
+                parser_backend=project_config.parser_backend,
+            ),
+            paths,
+        ):
             if record is not None:
                 records.append(record)
     return records
@@ -1076,7 +1094,11 @@ def index_project(
                         absolute_path = repo_dir / rel_path
                         if not absolute_path.is_file():
                             continue
-                        record = scan_file(absolute_path, pathlib.Path(rel_path))
+                        record = scan_file(
+                            absolute_path,
+                            pathlib.Path(rel_path),
+                            parser_backend=config.parser_backend,
+                        )
                         if record is not None:
                             candidate_records.append(record)
                 if not incremental:
@@ -1151,6 +1173,7 @@ def index_project(
         stats["reference_resolution"] = reference_resolution
         audit(conn, "index.completed", stats)
         audit(conn, "references.resolved", reference_resolution)
+        stats["search_index_documents"] = rebuild_search_index(conn)
         conn.commit()
     finally:
         conn.close()

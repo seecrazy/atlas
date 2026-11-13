@@ -1,0 +1,24 @@
+{
+  "semantic": [
+    {
+      "scope": "retry",
+      "expected_terms": ["symbols", "exported"]
+    },
+    {
+      "scope": "demo",
+      "expected_terms": ["Repository", "indexed", "files"]
+    }
+  ],
+  "agents": [
+    {
+      "question": "Read the implementation of execute_with_backoff",
+      "expected_symbols": ["execute_with_backoff"],
+      "expected_repo": "demo"
+    },
+    {
+      "question": "Which callers reference RetryClient?",
+      "expected_symbols": ["RetryClient"],
+      "expected_repo": "demo"
+    }
+  ]
+}

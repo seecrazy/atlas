@@ -14,6 +14,7 @@ from .config import ProjectConfig
 from .db import audit, connect, utcnow
 from .llm import LLMProvider, LLMUnavailable
 from .kernel import Budget
+from .store import rebuild_search_index
 
 
 def _memory_key(scope_type: str, scope_key: str) -> str:
@@ -193,6 +194,7 @@ def generate_semantic_memories(
         generated.append({"scope": subsystem, "memory_key": memory_key, "provider": "deterministic"})
 
     audit(conn, "memory.generated", {"count": len(generated), "scope": scope})
+    rebuild_search_index(conn)
     conn.commit()
     return {"generated": generated, "count": len(generated), "budget": budget.usage()}
 
@@ -297,6 +299,7 @@ def extract_revert_lessons(conn: sqlite3.Connection, config: ProjectConfig, *, l
             )
             lessons.append({"repo": repo_row["name"], "commit": commit, "memory_key": memory_key})
     audit(conn, "memory.lessons_extracted", {"count": len(lessons)})
+    rebuild_search_index(conn)
     conn.commit()
     return {"lessons": lessons, "count": len(lessons)}
 

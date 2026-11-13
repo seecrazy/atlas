@@ -53,17 +53,21 @@ ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整�
 31. propose → approve → apply 补丁工作流。
 32. 策略蒸馏、离线变体评分、HTTP JSON-RPC Server。
 33. 并行解析和基础 call edge 抽取。
+34. tree-sitter 深度解析后端。
+35. SQLite FTS5 hybrid search。
+36. OS event watchfiles daemon。
+37. Git / PR 发布工作流。
+38. 生产评估 harness。
+39. 变体提升 / 回滚审批。
 
 ## 下一步
 
 1. 构建 10 个真实调用关系的验收用例。
 2. 在真实大仓验证工作区检测成本和边界。
-3. 为 Go/Java/Rust parser 增加方法级 receiver 解析。
+3. 在真实大仓验证 tree-sitter、hybrid search、daemon 和 PR 工作流。
 4. 用真实项目验证 ambiguous 引用的干扰率。
 5. 在真实大仓验证 Router accuracy、导出传播和 daemon 成本。
 6. 用真实大仓评估 LLM Worker、语义记忆和影响传播质量。
-7. 将 accepted evolution variants 接入人类提升流程。
-8. 将 PR / Git remote 集成接到审批补丁之后。
 
 ## 阅读顺序
 

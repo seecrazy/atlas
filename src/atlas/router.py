@@ -122,12 +122,12 @@ def route_request(conn: sqlite3.Connection, question: str, *, limit: int = 10) -
 
     if _contains_any(question, MEMORY_TERMS):
         intent = "memory"
+    elif _contains_any(question, IMPLEMENTATION_TERMS):
+        intent = "implementation"
     elif _contains_any(question, IMPACT_TERMS) or (
         _contains_any(question, IMPLEMENTATION_TERMS) and refs
     ):
         intent = "impact"
-    elif _contains_any(question, IMPLEMENTATION_TERMS):
-        intent = "implementation"
     else:
         intent = "locate"
 
@@ -167,6 +167,17 @@ def route_request(conn: sqlite3.Connection, question: str, *, limit: int = 10) -
     if ambiguous_refs:
         confidence -= 0.08
     confidence = max(0.40, min(0.90, confidence))
+
+    # Promoted strategy variants are auditable and can override static rules.
+    for rule in conn.execute(
+        "SELECT pattern, intent, role, utility_score FROM strategy_rules WHERE utility_score >= 0.65 ORDER BY utility_score DESC"
+    ):
+        if rule["pattern"].lower() in question.lower():
+            intent = rule["intent"]
+            role = rule["role"]
+            confidence = max(confidence, min(0.9, float(rule["utility_score"])))
+            signals.append("promoted_strategy_rule")
+            break
 
     if intent == "locate":
         recommended_tools = ["atlas_search", "atlas_symbols", "atlas_file_context"]

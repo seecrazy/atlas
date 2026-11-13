@@ -21,6 +21,7 @@ from .store import (
     references,
     scoped_search,
     search,
+    hybrid_search,
     review_memory,
     symbols,
 )
@@ -32,8 +33,9 @@ from .memory import generate_semantic_memories, auto_review_stale_memories, extr
 from .architecture import sync_contracts, list_contracts, contract_impact, ingest_architecture_docs, list_architecture_docs
 from .agents import run_layered_agents
 from .kernel import list_approvals, decide_approval
-from .changes import propose_patch, decide_patch, apply_patch, list_patches
-from .evolution import distill_strategy_rules, evaluate_variant, list_variants
+from .changes import propose_patch, decide_patch, apply_patch, list_patches, propose_publication, publish_patch
+from .evolution import distill_strategy_rules, evaluate_variant, list_variants, propose_promotion, promote_variant, propose_rollback, rollback_variant
+from .evaluation import run_production_evaluation
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -521,6 +523,126 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "atlas_hybrid_search",
+        "description": "Use SQLite FTS5 hybrid ranking over symbols, memories, contracts, and docs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_propose_publication",
+        "description": "Request high-risk approval to publish an applied patch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "patch_key": {"type": "string", "minLength": 1},
+                "remote": {"type": "string", "minLength": 1},
+                "base_branch": {"type": "string", "minLength": 1},
+                "branch": {"type": "string", "minLength": 1},
+                "title": {"type": "string", "minLength": 1},
+                "body": {"type": "string"},
+                "requested_by": {"type": "string", "minLength": 1},
+            },
+            "required": ["patch_key", "remote", "base_branch", "branch", "title", "requested_by"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_publish_patch",
+        "description": "Publish an approved applied patch to Git and optionally create a PR.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "patch_key": {"type": "string", "minLength": 1},
+                "remote": {"type": "string", "minLength": 1},
+                "base_branch": {"type": "string", "minLength": 1},
+                "branch": {"type": "string", "minLength": 1},
+                "title": {"type": "string", "minLength": 1},
+                "body": {"type": "string"},
+                "approval_key": {"type": "string", "minLength": 1},
+                "published_by": {"type": "string", "minLength": 1},
+                "push": {"type": "boolean"},
+                "create_pr": {"type": "boolean"},
+            },
+            "required": ["patch_key", "remote", "base_branch", "branch", "title", "approval_key", "published_by"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_production_evaluation",
+        "description": "Run frozen semantic, agent, and router evaluation harness.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cases_path": {"type": "string"},
+                "use_llm": {"type": "boolean"},
+                "record": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_propose_variant_promotion",
+        "description": "Request high-risk approval to promote an accepted strategy variant.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "variant_key": {"type": "string", "minLength": 1},
+                "requested_by": {"type": "string", "minLength": 1},
+            },
+            "required": ["variant_key", "requested_by"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_promote_variant",
+        "description": "Promote an approved strategy variant into runtime strategy rules.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "variant_key": {"type": "string", "minLength": 1},
+                "approval_key": {"type": "string", "minLength": 1},
+                "promoted_by": {"type": "string", "minLength": 1},
+            },
+            "required": ["variant_key", "approval_key", "promoted_by"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_propose_variant_rollback",
+        "description": "Request high-risk approval to roll back a promoted strategy variant.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "variant_key": {"type": "string", "minLength": 1},
+                "requested_by": {"type": "string", "minLength": 1},
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "required": ["variant_key", "requested_by", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "atlas_rollback_variant",
+        "description": "Roll back an approved promoted strategy variant.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "variant_key": {"type": "string", "minLength": 1},
+                "approval_key": {"type": "string", "minLength": 1},
+                "rolled_back_by": {"type": "string", "minLength": 1},
+            },
+            "required": ["variant_key", "approval_key", "rolled_back_by"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -629,6 +751,8 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
             limit=args.get("limit"),
             actor="mcp",
         )
+    if name == "atlas_hybrid_search":
+        return hybrid_search(conn, args["query"], limit=args.get("limit"))
     if name == "atlas_route":
         return route_request(conn, args["question"], limit=args.get("limit", 10))
     if name == "atlas_memories":
@@ -722,6 +846,64 @@ def _dispatch_tool(conn, config: ProjectConfig, name: str, args: dict) -> Any:
         return distill_strategy_rules(conn, limit=args.get("limit", 100))
     if name == "atlas_evaluate_variant":
         return evaluate_variant(conn, config, args["variant_key"], record=args.get("record", True))
+    if name == "atlas_propose_publication":
+        return propose_publication(
+            conn,
+            config,
+            args["patch_key"],
+            remote=args["remote"],
+            base_branch=args["base_branch"],
+            branch=args["branch"],
+            title=args["title"],
+            body=args.get("body", ""),
+            requested_by=args["requested_by"],
+        )
+    if name == "atlas_publish_patch":
+        return publish_patch(
+            conn,
+            config,
+            args["patch_key"],
+            remote=args["remote"],
+            base_branch=args["base_branch"],
+            branch=args["branch"],
+            title=args["title"],
+            body=args.get("body", ""),
+            approval_key=args["approval_key"],
+            published_by=args["published_by"],
+            push=args.get("push", True),
+            create_pr=args.get("create_pr", True),
+        )
+    if name == "atlas_production_evaluation":
+        return run_production_evaluation(
+            conn,
+            config,
+            cases_path=args.get("cases_path"),
+            use_llm=args.get("use_llm", False),
+            record=args.get("record", True),
+        )
+    if name == "atlas_propose_variant_promotion":
+        return propose_promotion(conn, args["variant_key"], requested_by=args["requested_by"])
+    if name == "atlas_promote_variant":
+        return promote_variant(
+            conn,
+            args["variant_key"],
+            approval_key=args["approval_key"],
+            promoted_by=args["promoted_by"],
+        )
+    if name == "atlas_propose_variant_rollback":
+        return propose_rollback(
+            conn,
+            args["variant_key"],
+            requested_by=args["requested_by"],
+            reason=args["reason"],
+        )
+    if name == "atlas_rollback_variant":
+        return rollback_variant(
+            conn,
+            args["variant_key"],
+            approval_key=args["approval_key"],
+            rolled_back_by=args["rolled_back_by"],
+        )
     raise KeyError(name)
 
 

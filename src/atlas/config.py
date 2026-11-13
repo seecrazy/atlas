@@ -38,6 +38,7 @@ class ProjectConfig:
         "api_key_env": "ATLAS_LLM_API_KEY",
         "model_env": "ATLAS_LLM_MODEL",
     })
+    parser_backend: str = "auto"
 
     @property
     def atlas_dir(self) -> pathlib.Path:
@@ -77,6 +78,7 @@ def default_config(project_root: pathlib.Path) -> dict:
             "api_key_env": "ATLAS_LLM_API_KEY",
             "model_env": "ATLAS_LLM_MODEL",
         },
+        "parser_backend": "auto",
     }
 
 
@@ -159,6 +161,9 @@ def load_config(project_root: str | pathlib.Path) -> ProjectConfig:
     llm = raw.get("llm", default_llm)
     if not isinstance(llm, dict):
         raise ConfigError("config.llm must be an object")
+    parser_backend = str(raw.get("parser_backend", "auto")).lower()
+    if parser_backend not in {"auto", "tree-sitter", "builtin"}:
+        raise ConfigError("config.parser_backend must be auto, tree-sitter, or builtin")
     return ProjectConfig(
         project_root=root,
         project=project.strip(),
@@ -170,5 +175,6 @@ def load_config(project_root: str | pathlib.Path) -> ProjectConfig:
         max_workers=max_workers,
         budgets=budgets,
         llm=llm,
+        parser_backend=parser_backend,
     )
 

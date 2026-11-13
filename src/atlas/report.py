@@ -30,6 +30,10 @@ def _warnings(report: dict) -> list[str]:
         warnings.append("router validation has not been run")
     elif router_validation["intent_accuracy"] < 0.8:
         warnings.append("router intent accuracy is below 0.8")
+    if report.get("architecture_doc_count", 0) == 0:
+        warnings.append("architecture documents have not been indexed")
+    if report.get("contract_count", 0) == 0:
+        warnings.append("architecture contracts are not configured")
     return warnings
 
 

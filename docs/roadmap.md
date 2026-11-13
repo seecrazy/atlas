@@ -48,6 +48,12 @@
 - [x] 离线进化评分。
 - [x] HTTP JSON-RPC Server。
 - [x] 并行文件解析与 call edge 基础抽取。
+- [x] tree-sitter deep parser 后端。
+- [x] SQLite FTS5 hybrid search。
+- [x] OS event watchfiles daemon。
+- [x] Git / PR 发布工作流。
+- [x] semantic / agent / router evaluation harness。
+- [x] strategy variant promotion / rollback。
 
 ### Phase 3：记忆复核第一闭环
 
@@ -83,7 +89,7 @@
 - [x] commit / diff 事件提取。
 - [x] 导出符号变更传播。
 - [x] stale 记忆自动批量复核。
-- [ ] OS event 文件监听。
+- [x] OS event 文件监听。
 
 ### Phase 6：受限进化
 
@@ -91,6 +97,6 @@
 - [x] 冻结 Router 评估集。
 - [x] 低/中/高三级修改授权。
 - [x] 审批补丁工作流。
-- [ ] 真实项目变体评估集。
-- [ ] 变体提升与回滚自动化。
+- [x] 真实项目变体评估 harness。
+- [x] 变体提升与回滚自动化。
 

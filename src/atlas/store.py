@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -172,6 +173,120 @@ def search(conn: sqlite3.Connection, query: str, limit: int | None = None) -> li
         }
         for row in rows
     ]
+
+
+def _fts_query(query: str) -> str:
+    tokens = re.findall(r"[\w]+", query.lower())
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{token}"*' for token in tokens)
+
+
+def rebuild_search_index(conn: sqlite3.Connection) -> dict:
+    conn.execute("DELETE FROM search_index")
+    symbol_rows = conn.execute(
+        """
+        SELECT s.id, s.name, s.qualified_name, s.kind, s.exported, f.path,
+               r.name AS repo, r.subsystem, f.mtime
+        FROM symbols s
+        JOIN files f ON f.id = s.file_id
+        JOIN repos r ON r.id = s.repo_id
+        """
+    ).fetchall()
+    for row in symbol_rows:
+        conn.execute(
+            "INSERT INTO search_index(title, body, path, repo, subsystem, doc_type, doc_id, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                row["name"],
+                f"{row['qualified_name']} {row['kind']} {'exported' if row['exported'] else ''}",
+                row["path"], row["repo"], row["subsystem"], "symbol", row["id"],
+                datetime.fromtimestamp(float(row["mtime"]), timezone.utc).isoformat(),
+            ),
+        )
+    memory_rows = conn.execute(
+        "SELECT id, memory_key, claim, updated_at FROM memories"
+    ).fetchall()
+    for row in memory_rows:
+        conn.execute(
+            "INSERT INTO search_index(title, body, path, repo, subsystem, doc_type, doc_id, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (row["memory_key"], row["claim"], "", "", "", "memory", row["id"], row["updated_at"]),
+        )
+    contract_rows = conn.execute("SELECT id, name, provider_repo, provider_subsystem, consumers_json, updated_at FROM contracts").fetchall()
+    for row in contract_rows:
+        conn.execute(
+            "INSERT INTO search_index(title, body, path, repo, subsystem, doc_type, doc_id, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (row["name"], f"{row['provider_repo']} {row['consumers_json']}", "", row["provider_repo"], row["provider_subsystem"], "contract", row["id"], row["updated_at"]),
+        )
+    doc_rows = conn.execute("SELECT id, path, kind, title, summary, indexed_at FROM architecture_docs").fetchall()
+    for row in doc_rows:
+        conn.execute(
+            "INSERT INTO search_index(title, body, path, repo, subsystem, doc_type, doc_id, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (row["title"], row["summary"], row["path"], "", "", row["kind"], row["id"], row["indexed_at"]),
+        )
+    conn.commit()
+    return {"indexed": len(symbol_rows) + len(memory_rows) + len(contract_rows) + len(doc_rows)}
+
+
+def hybrid_search(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int | None = None,
+) -> list[dict]:
+    if not query.strip():
+        return []
+    limit = _limit(limit)
+    fts_query = _fts_query(query)
+    if not fts_query:
+        return search(conn, query, limit=limit)
+    try:
+        rows = conn.execute(
+            """
+            SELECT title, body, path, repo, subsystem, doc_type, doc_id, updated_at,
+                   bm25(search_index) AS lexical_rank
+            FROM search_index
+            WHERE search_index MATCH ?
+            ORDER BY lexical_rank
+            LIMIT ?
+            """,
+            (fts_query, limit * 3),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        fallback = search(conn, query, limit=limit)
+        return [
+            {**item, "doc_type": "symbol", "score": 0.5, "freshness": "unknown"}
+            for item in fallback
+        ]
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for row in rows:
+        lexical = max(0.0, -float(row["lexical_rank"]))
+        normalized_lexical = min(1.0, lexical / (lexical + 3.0))
+        type_weight = {"symbol": 1.0, "contract": 0.9, "memory": 0.7, "adr": 0.8}.get(row["doc_type"], 0.6)
+        try:
+            updated = datetime.fromisoformat(str(row["updated_at"]))
+        except ValueError:
+            updated = now
+        age_days = max(0.0, (now - updated).total_seconds() / 86400)
+        freshness = min(1.0, 1.0 / (1.0 + age_days / 30.0))
+        score = round(0.55 * normalized_lexical + 0.3 * type_weight + 0.15 * freshness, 4)
+        results.append(
+            {
+                "doc_type": row["doc_type"],
+                "doc_id": row["doc_id"],
+                "title": row["title"],
+                "summary": row["body"][:500],
+                "path": row["path"],
+                "repo": row["repo"],
+                "subsystem": row["subsystem"],
+                "updated_at": row["updated_at"],
+                "score": score,
+                "freshness": round(freshness, 4),
+                "lexical_score": round(normalized_lexical, 4),
+            }
+        )
+    return sorted(results, key=lambda item: item["score"], reverse=True)[:limit]
 
 
 def symbols(
@@ -359,6 +474,7 @@ def impact_chain(
             JOIN files sf2 ON sf2.id = ref2.source_file_id
             JOIN repos r2 ON r2.id = ref2.source_repo_id
             WHERE tf2.id IN ({placeholders})
+              AND sf2.id != tf2.id
               AND (? IS NULL OR ref2.confidence >= ?)
             ORDER BY sf2.path, ref2.line
             LIMIT ?

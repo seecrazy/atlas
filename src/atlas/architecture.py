@@ -10,6 +10,7 @@ import sqlite3
 
 from .config import ProjectConfig
 from .db import audit, utcnow
+from .store import rebuild_search_index
 from .store import references
 
 
@@ -50,6 +51,7 @@ def sync_contracts(conn: sqlite3.Connection, config: ProjectConfig) -> dict:
         )
         synced.append({"contract_key": key, "name": name, "provider_repo": provider_repo})
     audit(conn, "contracts.synced", {"count": len(synced)})
+    rebuild_search_index(conn)
     conn.commit()
     return {"synced": synced, "count": len(synced)}
 
@@ -142,6 +144,7 @@ def ingest_architecture_docs(conn: sqlite3.Connection, config: ProjectConfig) ->
             )
             indexed.append({"path": stable, "kind": kind, "title": title})
     audit(conn, "architecture_docs.indexed", {"count": len(indexed)})
+    rebuild_search_index(conn)
     conn.commit()
     return {"indexed": indexed, "count": len(indexed)}
 

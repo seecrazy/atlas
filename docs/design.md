@@ -255,6 +255,58 @@ Worker 是结构索引驱动的确定性角色，不调用 LLM，不读取函数
 4. `--max-iterations` 用于测试和一次性运行。
 5. Ctrl-C 正常退出，已有错误不中断后续周期。
 
+### Deep Parser
+
+默认解析后端是 `auto`：
+
+1. 安装 `tree-sitter-language-pack` 时使用 tree-sitter 抽取 symbols。
+2. imports / calls 仍由各语言的轻量规则抽取。
+3. 未安装 tree-sitter 时自动退回内置解析器。
+4. 配置 `parser_backend: tree-sitter` 强制启用；`builtin` 强制禁用。
+5. 解析失败写入 index diagnostics，不阻断索引。
+
+### Hybrid Search
+
+SQLite FTS5 维护 `search_index`：
+
+1. 索引 symbols、semantic memories、contracts、architecture docs。
+2. `atlas_hybrid_search` 使用 BM25 和结构权重合成排序。
+3. 结果返回 doc_type、score、path、repo、subsystem、freshness。
+4. 索引完成后自动重建；记忆 / 契约 / 文档变化后增量重建。
+5. 未支持 FTS5 的 SQLite 自动退回 LIKE 搜索。
+
+### 发布与 PR
+
+已应用补丁可以进入 Git 发布流程：
+
+1. `atlas patch propose-publish` 创建 high-risk `create_pr` 审批。
+2. 人类审批后 `atlas patch publish` 才允许执行。
+3. 可创建分支、commit 已应用补丁、push 到 remote。
+4. 若安装并登录 `gh`，可创建 Pull Request。
+5. 分支、commit、push、PR URL 全部写入审计。
+
+### 生产评估
+
+`atlas evaluate` 提供冻结评估 harness：
+
+| 类型 | 指标 |
+| --- | --- |
+| `semantic` | expected term precision / recall / F1 |
+| `agents` | expected symbol hit rate、evidence coverage、finding confidence |
+| `router` | intent accuracy、role accuracy |
+
+评估集由项目提供，可指向真实仓库。结果写入 audit 并可用于进化的 accepted 判定。
+
+### 变体提升与回滚
+
+`strategy_rule` 变体进入完整审批闭环：
+
+1. `atlas evolution propose-promotion` 创建 high-risk `promote_variant` 审批。
+2. 人类审批后 `atlas evolution promote` 才写入 `strategy_rules`。
+3. Router 在运行时读取 active strategy rules。
+4. `atlas evolution rollback` 也要审批，删除规则并记录回滚。
+5. rule source 记录 variant_key，便于精确回滚。
+
 ### 上下文包
 
 Phase 4 将上下文包构建做成固定边界的服务端能力：

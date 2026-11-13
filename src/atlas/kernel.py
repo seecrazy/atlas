@@ -15,6 +15,9 @@ from .db import audit, utcnow
 
 HIGH_RISK_ACTIONS = {
     "apply_patch",
+    "create_pr",
+    "promote_variant",
+    "rollback_variant",
     "delete_file",
     "external_send",
     "permission_change",

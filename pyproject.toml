@@ -9,6 +9,18 @@ description = "Layered project knowledge indexing and MCP server for very large 
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+production = [
+  "tree-sitter-language-pack>=0.9.0",
+  "watchfiles>=1.1.0",
+]
+watch = [
+  "watchfiles>=1.1.0",
+]
+deep-parser = [
+  "tree-sitter-language-pack>=0.9.0",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 

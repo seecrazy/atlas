@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import load_config
@@ -13,6 +14,8 @@ from .mcp import McpServer
 
 class AtlasHTTPHandler(BaseHTTPRequestHandler):
     server_version = "ATLAS/0.1"
+    max_body_bytes = 1_000_000
+    requests_per_minute = 240
 
     def _auth_ok(self) -> bool:
         expected = os.environ.get("ATLAS_HTTP_TOKEN")
@@ -29,6 +32,19 @@ class AtlasHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _rate_limited(self) -> bool:
+        bucket = getattr(self.server, "atlas_rate_bucket", None)
+        if bucket is None:
+            bucket = {}
+            self.server.atlas_rate_bucket = bucket
+        now = time.monotonic()
+        window_start = now - 60.0
+        client = self.headers.get("X-Forwarded-For", self.client_address[0])
+        history = [item for item in bucket.get(client, []) if item >= window_start]
+        history.append(now)
+        bucket[client] = history
+        return len(history) > self.requests_per_minute
+
     def do_GET(self) -> None:
         if self.path != "/health":
             self._send_json(404, {"error": "not found"})
@@ -44,6 +60,22 @@ class AtlasHTTPHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length > self.max_body_bytes:
+                self._send_json(
+                    413,
+                    {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "request too large"}},
+                )
+                return
+        except ValueError as exc:
+            self._send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": str(exc)}})
+            return
+        if self._rate_limited():
+            self._send_json(
+                429,
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "rate limit exceeded"}},
+            )
+            return
+        try:
             message = json.loads(self.rfile.read(length).decode("utf-8"))
         except (ValueError, json.JSONDecodeError) as exc:
             self._send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}})

@@ -9,6 +9,7 @@ import sqlite3
 
 from .config import ProjectConfig
 from .db import audit, utcnow
+from .kernel import request_approval
 from .router import evaluate_router, route_request
 
 
@@ -111,7 +112,7 @@ def evaluate_variant(
 
 
 def list_variants(conn: sqlite3.Connection, status: str | None = None, limit: int = 50) -> list[dict]:
-    if status is not None and status not in {"candidate", "accepted", "rejected"}:
+    if status is not None and status not in {"candidate", "accepted", "rejected", "promoted", "rolled_back"}:
         raise ValueError("variant status is invalid")
     sql = "SELECT * FROM evolution_variants"
     params: list[object] = []
@@ -124,3 +125,115 @@ def list_variants(conn: sqlite3.Connection, status: str | None = None, limit: in
         {**dict(row), "payload": json.loads(row["payload_json"])}
         for row in conn.execute(sql, params)
     ]
+
+
+def propose_promotion(
+    conn: sqlite3.Connection,
+    variant_key: str,
+    *,
+    requested_by: str,
+) -> dict:
+    row = conn.execute("SELECT * FROM evolution_variants WHERE variant_key = ?", (variant_key,)).fetchone()
+    if row is None:
+        raise FileNotFoundError(f"variant not found: {variant_key}")
+    if row["status"] != "accepted":
+        raise ValueError(f"only accepted variants can be promoted: {row['status']}")
+    if row["object_type"] != "strategy_rule":
+        raise ValueError("only strategy_rule variants support runtime promotion")
+    payload = json.loads(row["payload_json"])
+    rule_payload = {
+        "variant_key": variant_key,
+        "pattern": str(payload.get("pattern", "")).strip(),
+        "intent": payload.get("intent"),
+        "role": payload.get("role"),
+        "utility_score": payload.get("utility_score", row["score"]),
+    }
+    if not rule_payload["pattern"] or rule_payload["intent"] not in {"locate", "impact", "implementation", "memory"}:
+        raise ValueError("strategy rule variant requires pattern and valid intent")
+    if rule_payload["role"] not in {"architect", "system", "module", "developer"}:
+        raise ValueError("strategy rule variant requires a valid role")
+    return request_approval(conn, "promote_variant", rule_payload, requested_by=requested_by)
+
+
+def promote_variant(
+    conn: sqlite3.Connection,
+    variant_key: str,
+    *,
+    approval_key: str,
+    promoted_by: str,
+) -> dict:
+    approval = conn.execute("SELECT * FROM approvals WHERE approval_key = ?", (approval_key,)).fetchone()
+    if approval is None or approval["status"] != "approved" or approval["action_type"] != "promote_variant":
+        raise ValueError("promotion approval is not approved")
+    payload = json.loads(approval["payload_json"])
+    if payload.get("variant_key") != variant_key:
+        raise ValueError("promotion approval does not match variant")
+    rule_key = f"variant:{variant_key}"
+    now = utcnow()
+    conn.execute(
+        """
+        INSERT INTO strategy_rules(
+          rule_key, pattern, intent, role, utility_score, hits, source, created_at, updated_at
+        ) VALUES(?,?,?,?,?,0,?, ?, ?)
+        ON CONFLICT(rule_key) DO UPDATE SET
+          pattern=excluded.pattern, intent=excluded.intent, role=excluded.role,
+          utility_score=excluded.utility_score, updated_at=excluded.updated_at
+        """,
+        (
+            rule_key, payload["pattern"], payload["intent"], payload["role"],
+            float(payload["utility_score"]), variant_key, now, now,
+        ),
+    )
+    conn.execute(
+        "UPDATE evolution_variants SET status = 'promoted', evaluated_at = ? WHERE variant_key = ?",
+        (now, variant_key),
+    )
+    audit(conn, "evolution.variant_promoted", {"variant_key": variant_key, "rule_key": rule_key}, actor=promoted_by)
+    conn.commit()
+    return {"variant_key": variant_key, "rule_key": rule_key, "status": "promoted"}
+
+
+def propose_rollback(
+    conn: sqlite3.Connection,
+    variant_key: str,
+    *,
+    requested_by: str,
+    reason: str,
+) -> dict:
+    if not reason.strip():
+        raise ValueError("rollback reason must be non-empty")
+    row = conn.execute("SELECT * FROM evolution_variants WHERE variant_key = ?", (variant_key,)).fetchone()
+    if row is None or row["status"] != "promoted":
+        raise ValueError("only promoted variants can be rolled back")
+    return request_approval(
+        conn,
+        "rollback_variant",
+        {"variant_key": variant_key, "reason": reason},
+        requested_by=requested_by,
+    )
+
+
+def rollback_variant(
+    conn: sqlite3.Connection,
+    variant_key: str,
+    *,
+    approval_key: str,
+    rolled_back_by: str,
+) -> dict:
+    approval = conn.execute("SELECT * FROM approvals WHERE approval_key = ?", (approval_key,)).fetchone()
+    if approval is None or approval["status"] != "approved" or approval["action_type"] != "rollback_variant":
+        raise ValueError("rollback approval is not approved")
+    payload = json.loads(approval["payload_json"])
+    if payload.get("variant_key") != variant_key:
+        raise ValueError("rollback approval does not match variant")
+    rule_key = f"variant:{variant_key}"
+    conn.execute("DELETE FROM strategy_rules WHERE rule_key = ? AND source = ?", (rule_key, variant_key))
+    conn.execute("UPDATE evolution_variants SET status = 'rolled_back', evaluated_at = ? WHERE variant_key = ?", (utcnow(), variant_key))
+    audit(
+        conn,
+        "evolution.variant_rolled_back",
+        {"variant_key": variant_key, "rule_key": rule_key, "reason": payload.get("reason")},
+        actor=rolled_back_by,
+    )
+    conn.commit()
+    return {"variant_key": variant_key, "rule_key": rule_key, "status": "rolled_back"}

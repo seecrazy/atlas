@@ -4,7 +4,7 @@ ATLAS 是一个面向超大项目的分层项目知识系统。它把项目组�
 
 ## 当前状态
 
-项目处于 **Phase 5 完整本地 MVP**：多仓基础索引、Python/TypeScript/JavaScript/Go/Java/Rust 符号与基础 call edge 抽取、SQLite 存储、MCP stdio / HTTP Server、Git-aware 增量索引、未提交工作区检测、引用解析置信度、确定性 Router、四层 Agent、Kernel Budget/审批、语义记忆、架构契约与文档、审批补丁工作流、离线进化评估和审计记录已经可用。
+项目处于 **Phase 6 生产化完整版**：tree-sitter 深度解析后端、FTS5 hybrid search、OS event 文件监听、Git/PR 发布工作流、生产评估 harness、变体提升与回滚、多仓索引、MCP stdio / HTTP、四层 Agent、Kernel 审批、语义记忆、架构契约、审批补丁和完整审计已经可用。
 
 运行环境要求 Python 3.9+。
 
@@ -21,6 +21,9 @@ ATLAS 是一个面向超大项目的分层项目知识系统。它把项目组�
 ```bash
 cd atlas
 python3 -m pip install -e .
+
+# 安装生产增强依赖（tree-sitter + watchfiles）
+python3 -m pip install -e '.[production]'
 
 # 在任意项目根目录执行
 atlas init /path/to/project
@@ -42,6 +45,15 @@ atlas propagate /path/to/project
 
 # 前台轮询增量索引
 atlas daemon /path/to/project --interval 5 --max-iterations 1
+
+# OS event 文件监听
+atlas daemon /path/to/project --watch --debounce-ms 300
+
+# Hybrid search
+atlas search /path/to/project "retry timeout" --hybrid
+
+# 生产评估
+atlas evaluate /path/to/project --no-llm
 
 # 只处理 commit-to-commit 变化，不扫描未提交工作区
 atlas index /path/to/project --no-workspace
@@ -77,6 +89,16 @@ atlas approvals list /path/to/project --status pending
 atlas patch propose /path/to/project --file repo/src/a.py --old-text "def a():" --new-text "def a():  # changed" --title "change a" --created-by agent
 atlas approvals decide /path/to/project 1 approved --approver human --reason "reviewed"
 atlas patch apply /path/to/project PATCH_KEY --applied-by human --test-command "true"
+
+# 发布分支 / PR
+atlas patch propose-publish /path/to/project PATCH_KEY --branch feature/atlas-change --title "Change" --requested-by agent
+atlas patch publish /path/to/project PATCH_KEY --branch feature/atlas-change --title "Change" --approval-key APPROVAL_KEY --published-by human
+
+# 变体提升 / 回滚
+atlas evolution propose-promotion /path/to/project VARIANT_KEY --requested-by agent
+atlas evolution promote /path/to/project VARIANT_KEY --approval-key APPROVAL_KEY --promoted-by human
+atlas evolution propose-rollback /path/to/project VARIANT_KEY --requested-by human --reason "bad effect"
+atlas evolution rollback /path/to/project VARIANT_KEY --approval-key APPROVAL_KEY --rolled-back-by human
 
 # 离线进化
 atlas evolution distill /path/to/project

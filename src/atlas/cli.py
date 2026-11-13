@@ -10,7 +10,7 @@ import sys
 from .config import ConfigError, load_config, write_default_config
 from .db import connect
 from .indexer import index_project
-from .store import health
+from .store import health, hybrid_search
 from .report import health_report
 from .router import evaluate_router
 from .propagation import export_propagation
@@ -20,8 +20,10 @@ from .agents import run_layered_agents
 from .memory import generate_semantic_memories, auto_review_stale_memories, extract_revert_lessons
 from .architecture import sync_contracts, list_contracts, contract_impact, ingest_architecture_docs, list_architecture_docs
 from .kernel import list_approvals, decide_approval
-from .changes import propose_patch, decide_patch, apply_patch, list_patches
-from .evolution import distill_strategy_rules, create_variant, evaluate_variant, list_variants
+from .changes import propose_patch, decide_patch, apply_patch, list_patches, propose_publication, publish_patch
+from .evolution import distill_strategy_rules, create_variant, evaluate_variant, list_variants, propose_promotion, promote_variant, propose_rollback, rollback_variant
+from .evaluation import run_production_evaluation
+from .daemon import run_watch_daemon
 
 
 def print_json(value: dict | list) -> None:
@@ -130,6 +132,16 @@ def command_propagate(args: argparse.Namespace) -> int:
 
 def command_daemon(args: argparse.Namespace) -> int:
     config = load_config(args.project_root)
+    if args.watch:
+        result = run_watch_daemon(
+            config,
+            debounce_ms=args.debounce_ms,
+            full=args.full,
+            include_workspace=not args.no_workspace,
+            on_cycle=lambda cycle: print_json(cycle),
+        )
+        print_json(result)
+        return 0
     result = run_daemon(
         config,
         interval=args.interval,
@@ -138,6 +150,39 @@ def command_daemon(args: argparse.Namespace) -> int:
         include_workspace=not args.no_workspace,
         on_cycle=lambda cycle: print_json(cycle),
     )
+    print_json(result)
+    return 0
+
+
+def command_search(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        if args.hybrid:
+            result = hybrid_search(conn, args.query, limit=args.limit)
+        else:
+            from .store import search
+
+            result = search(conn, args.query, limit=args.limit)
+    finally:
+        conn.close()
+    print_json(result)
+    return 0
+
+
+def command_evaluate(args: argparse.Namespace) -> int:
+    config = load_config(args.project_root)
+    conn = connect(config.db_path)
+    try:
+        result = run_production_evaluation(
+            conn,
+            config,
+            cases_path=args.cases,
+            use_llm=not args.no_llm,
+            record=not args.no_record,
+        )
+    finally:
+        conn.close()
     print_json(result)
     return 0
 
@@ -258,6 +303,33 @@ def command_patch(args: argparse.Namespace) -> int:
             )
         elif args.patch_command == "list":
             result = list_patches(conn, status=args.status, limit=args.limit)
+        elif args.patch_command == "propose-publish":
+            result = propose_publication(
+                conn,
+                config,
+                args.patch_key,
+                remote=args.remote,
+                base_branch=args.base_branch,
+                branch=args.branch,
+                title=args.title,
+                body=args.body,
+                requested_by=args.requested_by,
+            )
+        elif args.patch_command == "publish":
+            result = publish_patch(
+                conn,
+                config,
+                args.patch_key,
+                remote=args.remote,
+                base_branch=args.base_branch,
+                branch=args.branch,
+                title=args.title,
+                body=args.body,
+                approval_key=args.approval_key,
+                published_by=args.published_by,
+                push=not args.no_push,
+                create_pr=not args.no_pr,
+            )
         else:
             raise ValueError("unknown patch action")
     finally:
@@ -285,6 +357,29 @@ def command_evolution(args: argparse.Namespace) -> int:
             result = evaluate_variant(conn, config, args.variant_key, record=not args.no_record)
         elif args.evolution_command == "list":
             result = list_variants(conn, status=args.status, limit=args.limit)
+        elif args.evolution_command == "propose-promotion":
+            result = propose_promotion(conn, args.variant_key, requested_by=args.requested_by)
+        elif args.evolution_command == "promote":
+            result = promote_variant(
+                conn,
+                args.variant_key,
+                approval_key=args.approval_key,
+                promoted_by=args.promoted_by,
+            )
+        elif args.evolution_command == "propose-rollback":
+            result = propose_rollback(
+                conn,
+                args.variant_key,
+                requested_by=args.requested_by,
+                reason=args.reason,
+            )
+        elif args.evolution_command == "rollback":
+            result = rollback_variant(
+                conn,
+                args.variant_key,
+                approval_key=args.approval_key,
+                rolled_back_by=args.rolled_back_by,
+            )
         else:
             raise ValueError("unknown evolution action")
     finally:
@@ -366,10 +461,26 @@ def build_parser() -> argparse.ArgumentParser:
     propagate_parser.add_argument("--min-confidence", type=float, default=0.65)
     propagate_parser.set_defaults(handler=command_propagate)
 
+    search_parser = commands.add_parser("search", help="search indexed symbols, memories, and docs")
+    search_parser.add_argument("project_root", nargs="?", default=".")
+    search_parser.add_argument("query")
+    search_parser.add_argument("--limit", type=int, default=50)
+    search_parser.add_argument("--hybrid", action="store_true", help="use SQLite FTS5 hybrid scoring")
+    search_parser.set_defaults(handler=command_search)
+
+    evaluate_parser = commands.add_parser("evaluate", help="run production evaluation harness")
+    evaluate_parser.add_argument("project_root", nargs="?", default=".")
+    evaluate_parser.add_argument("--cases", help="JSON evaluation cases")
+    evaluate_parser.add_argument("--no-llm", action="store_true")
+    evaluate_parser.add_argument("--no-record", action="store_true")
+    evaluate_parser.set_defaults(handler=command_evaluate)
+
     daemon_parser = commands.add_parser("daemon", help="run foreground incremental indexing")
     daemon_parser.add_argument("project_root", nargs="?", default=".", help="ATLAS project root")
     daemon_parser.add_argument("--interval", type=float, default=5.0)
     daemon_parser.add_argument("--max-iterations", type=int)
+    daemon_parser.add_argument("--watch", action="store_true", help="use OS file notifications via watchfiles")
+    daemon_parser.add_argument("--debounce-ms", type=int, default=300)
     daemon_parser.add_argument("--full", action="store_true")
     daemon_parser.add_argument("--no-workspace", action="store_true")
     daemon_parser.set_defaults(handler=command_daemon)
@@ -464,6 +575,29 @@ def build_parser() -> argparse.ArgumentParser:
     patch_list.add_argument("--status")
     patch_list.add_argument("--limit", type=int, default=50)
     patch_list.set_defaults(handler=command_patch)
+    patch_propose_publish = patch_sub.add_parser("propose-publish")
+    patch_propose_publish.add_argument("project_root", nargs="?", default=".")
+    patch_propose_publish.add_argument("patch_key")
+    patch_propose_publish.add_argument("--remote", default="origin")
+    patch_propose_publish.add_argument("--base-branch", default="main")
+    patch_propose_publish.add_argument("--branch", required=True)
+    patch_propose_publish.add_argument("--title", required=True)
+    patch_propose_publish.add_argument("--body")
+    patch_propose_publish.add_argument("--requested-by", required=True)
+    patch_propose_publish.set_defaults(handler=command_patch)
+    patch_publish = patch_sub.add_parser("publish")
+    patch_publish.add_argument("project_root", nargs="?", default=".")
+    patch_publish.add_argument("patch_key")
+    patch_publish.add_argument("--remote", default="origin")
+    patch_publish.add_argument("--base-branch", default="main")
+    patch_publish.add_argument("--branch", required=True)
+    patch_publish.add_argument("--title", required=True)
+    patch_publish.add_argument("--body")
+    patch_publish.add_argument("--approval-key", required=True)
+    patch_publish.add_argument("--published-by", required=True)
+    patch_publish.add_argument("--no-push", action="store_true")
+    patch_publish.add_argument("--no-pr", action="store_true")
+    patch_publish.set_defaults(handler=command_patch)
 
     evolution_parser = commands.add_parser("evolution", help="offline bounded evolution")
     evolution_sub = evolution_parser.add_subparsers(dest="evolution_command", required=True)
@@ -488,6 +622,29 @@ def build_parser() -> argparse.ArgumentParser:
     evolution_list.add_argument("--status")
     evolution_list.add_argument("--limit", type=int, default=50)
     evolution_list.set_defaults(handler=command_evolution)
+    evolution_promote = evolution_sub.add_parser("propose-promotion")
+    evolution_promote.add_argument("project_root", nargs="?", default=".")
+    evolution_promote.add_argument("variant_key")
+    evolution_promote.add_argument("--requested-by", required=True)
+    evolution_promote.set_defaults(handler=command_evolution)
+    evolution_promote = evolution_sub.add_parser("promote")
+    evolution_promote.add_argument("project_root", nargs="?", default=".")
+    evolution_promote.add_argument("variant_key")
+    evolution_promote.add_argument("--approval-key", required=True)
+    evolution_promote.add_argument("--promoted-by", required=True)
+    evolution_promote.set_defaults(handler=command_evolution)
+    evolution_rollback = evolution_sub.add_parser("propose-rollback")
+    evolution_rollback.add_argument("project_root", nargs="?", default=".")
+    evolution_rollback.add_argument("variant_key")
+    evolution_rollback.add_argument("--requested-by", required=True)
+    evolution_rollback.add_argument("--reason", required=True)
+    evolution_rollback.set_defaults(handler=command_evolution)
+    evolution_rollback = evolution_sub.add_parser("rollback")
+    evolution_rollback.add_argument("project_root", nargs="?", default=".")
+    evolution_rollback.add_argument("variant_key")
+    evolution_rollback.add_argument("--approval-key", required=True)
+    evolution_rollback.add_argument("--rolled-back-by", required=True)
+    evolution_rollback.set_defaults(handler=command_evolution)
 
     http_parser = commands.add_parser("serve-http", help="run HTTP JSON-RPC server")
     http_parser.add_argument("project_root", nargs="?", default=".")

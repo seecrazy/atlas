@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -265,6 +265,10 @@ CREATE INDEX IF NOT EXISTS idx_contracts_name ON contracts(name);
 CREATE INDEX IF NOT EXISTS idx_architecture_docs_kind ON architecture_docs(kind, path);
 CREATE INDEX IF NOT EXISTS idx_strategy_rules_pattern ON strategy_rules(pattern);
 CREATE INDEX IF NOT EXISTS idx_evolution_status ON evolution_variants(status, score);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+  title, body, path, repo, subsystem, doc_type UNINDEXED, doc_id UNINDEXED, updated_at UNINDEXED
+);
 """
 
 
@@ -277,6 +281,14 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+          title, body, path, repo, subsystem, doc_type UNINDEXED, doc_id UNINDEXED, updated_at UNINDEXED
+        )
+        """
+    )
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS agent_runs (
@@ -448,17 +460,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_refs_unique_edge "
         "ON refs(source_file_id, target_name, line, kind)"
     )
-    if "meta" in {
-        row["name"]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
-        )
-    }:
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(SCHEMA_VERSION),),
-        )
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
 
 
 def connect(db_path: str | pathlib.Path, *, create: bool = False) -> sqlite3.Connection:

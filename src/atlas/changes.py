@@ -182,3 +182,119 @@ def list_patches(conn: sqlite3.Connection, status: str | None = None, limit: int
         {key: value for key, value in dict(row).items() if key not in {"old_text", "new_text"}}
         for row in conn.execute(sql, params)
     ]
+
+
+def _git(repo_path: pathlib.Path, args: list[str], timeout: float = 60.0) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _gh(repo_path: pathlib.Path, args: list[str], timeout: float = 60.0) -> str:
+    result = subprocess.run(
+        ["gh", *args],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def propose_publication(
+    conn: sqlite3.Connection,
+    config: ProjectConfig,
+    patch_key: str,
+    *,
+    remote: str,
+    base_branch: str,
+    branch: str,
+    title: str,
+    body: str = "",
+    requested_by: str,
+) -> dict:
+    row = conn.execute("SELECT * FROM patches WHERE patch_key = ?", (patch_key,)).fetchone()
+    if row is None:
+        raise FileNotFoundError(f"patch not found: {patch_key}")
+    if row["status"] != "applied":
+        raise ValueError(f"patch must be applied before publication: {row['status']}")
+    if not branch.strip() or not title.strip():
+        raise ValueError("branch and title must be non-empty")
+    payload = {
+        "patch_key": patch_key,
+        "remote": remote,
+        "base_branch": base_branch,
+        "branch": branch,
+        "title": title,
+        "body": body,
+    }
+    return request_approval(conn, "create_pr", payload, requested_by=requested_by)
+
+
+def publish_patch(
+    conn: sqlite3.Connection,
+    config: ProjectConfig,
+    patch_key: str,
+    *,
+    remote: str,
+    base_branch: str,
+    branch: str,
+    title: str,
+    body: str = "",
+    approval_key: str,
+    published_by: str,
+    push: bool = True,
+    create_pr: bool = True,
+    timeout: float = 300.0,
+) -> dict:
+    approval = conn.execute("SELECT * FROM approvals WHERE approval_key = ?", (approval_key,)).fetchone()
+    if approval is None or approval["status"] != "approved":
+        raise ValueError("publication approval is not approved")
+    payload = json.loads(approval["payload_json"])
+    expected = {
+        "patch_key": patch_key,
+        "remote": remote,
+        "base_branch": base_branch,
+        "branch": branch,
+        "title": title,
+        "body": body,
+    }
+    if payload != expected:
+        raise ValueError("publication approval payload does not match request")
+    patch = conn.execute("SELECT * FROM patches WHERE patch_key = ?", (patch_key,)).fetchone()
+    if patch is None or patch["status"] != "applied":
+        raise ValueError("only applied patches can be published")
+    target = _file_row(conn, patch["file_path"])
+    repo_path = pathlib.Path(target["repo_path"])
+    relative = str(target["path"]).replace(f"{target['repo_name']}/", "", 1)
+    current_branch = _git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if current_branch != branch:
+        _git(repo_path, ["checkout", "-B", branch, base_branch])
+    _git(repo_path, ["add", "--", relative])
+    commit_message = f"{title}\n\nATLAS patch: {patch_key}\nApproved by: {published_by}"
+    _git(repo_path, ["commit", "-m", commit_message])
+    pushed = False
+    pr_url = None
+    if push:
+        _git(repo_path, ["push", "-u", remote, branch], timeout=timeout)
+        pushed = True
+    if create_pr:
+        pr_url = _gh(
+            repo_path,
+            ["pr", "create", "--base", base_branch, "--head", branch, "--title", title, "--body", body or commit_message],
+            timeout=timeout,
+        )
+    audit(
+        conn,
+        "patch.published",
+        {"patch_key": patch_key, "branch": branch, "remote": remote, "pushed": pushed, "pr_url": pr_url},
+        actor=published_by,
+    )
+    conn.commit()
+    return {"patch_key": patch_key, "branch": branch, "pushed": pushed, "pr_url": pr_url}
