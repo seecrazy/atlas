@@ -100,6 +100,11 @@
 | `semantic_generations` | 语义记忆生成任务和 provider |
 | `strategy_rules` | 从审计蒸馏出的路由策略与效用分数 |
 | `evolution_variants` | 离线进化变体、冻结评分与状态 |
+| `memory_fields` | 语义记忆的结构化字段，如 symbols、imports、language、repo |
+| `embeddings` | 本地向量索引，覆盖 symbols / memories / contracts / docs |
+| `run_metrics` | trace_id、耗时、状态、结果数等运行指标 |
+| `daemon_locks` | daemon 锁状态，防止重复运行 |
+| `symbols` 字段 | `signature_hash` 用于 API 签名变化检测 |
 
 ### 状态
 
@@ -113,9 +118,22 @@
 | Agent run | `running` / `completed` / `failed` |
 | 审批 | `pending` / `approved` / `rejected` |
 | 补丁 | `pending` / `approved` / `rejected` / `applied` |
-| 进化变体 | `candidate` / `accepted` / `rejected` |
+| 进化变体 | `candidate` / `accepted` / `rejected` / `promoted` / `rolled_back` |
 
-## 4. 关键交互
+## 4. 成熟度模型
+
+| 层级 | 定义 | 当前状态 |
+| --- | --- | --- |
+| L0 Demo | 能跑单仓示例 | 已完成 |
+| L1 Local MVP | 单机索引、查询、Agent、安全审批 | 已完成 |
+| L2 Verified Local | 有测试、诊断、自项目评估、审计 | 已完成 |
+| L3 Real-world Validated | 多语言大仓 golden set 已验证 | 进行中 |
+| L4 Production Service | 多人共享、RBAC、远端索引、SLA | 未开始 |
+| L5 Controlled Evolution | 影子评估、canary、自动回滚 | 部分完成 |
+
+当前不是分布式多用户系统。适合个人开发者或团队在本机 / 单工作区运行。
+
+## 5. 关键交互
 
 ### 索引
 
@@ -245,6 +263,14 @@ question
 
 Worker 是结构索引驱动的确定性角色，不调用 LLM，不读取函数体，不修改代码。Pipeline 输出 route、contexts、worker findings 和 convergence。缺少索引候选时返回 warning，而不是编造证据。
 
+### 运行指标与追踪
+
+1. 每次 MCP tool call 生成 `trace_id`。
+2. Pipeline / Agent / daemon / shadow evaluation 使用同一 trace 机制。
+3. `run_metrics` 记录耗时、状态、结果数和错误。
+4. health / report 输出 p95 duration、failed ratio、last daemon cycle。
+5. `audit_events` 与 `run_metrics` 可通过 trace_id 关联。
+
 ### 增量守护
 
 `atlas daemon` 是前台轮询循环，不是 OS daemon：
@@ -264,6 +290,27 @@ Worker 是结构索引驱动的确定性角色，不调用 LLM，不读取函数
 3. 未安装 tree-sitter 时自动退回内置解析器。
 4. 配置 `parser_backend: tree-sitter` 强制启用；`builtin` 强制禁用。
 5. 解析失败写入 index diagnostics，不阻断索引。
+
+### Structured Memory 与 Embedding
+
+语义记忆不仅保存自然语言 claim，还保存结构化字段：
+
+| 字段 | 示例 |
+| --- | --- |
+| `entity_type` | `file` / `repo` / `subsystem` |
+| `entity_key` | 稳定路径或名称 |
+| `language` | Python / TypeScript / Go 等 |
+| `repo` / `subsystem` | 归属边界 |
+| `symbol_count` | 文件内索引符号数 |
+| `exported_symbols` | 导出符号列表 |
+| `imports` | import/use 目标 |
+
+`embeddings` 使用本地 deterministic hashed embedding，无第三方模型依赖：
+
+1. 覆盖 symbols、memories、contracts、architecture docs。
+2. vector search 可返回 FTS 未命中的语义候选。
+3. hybrid search 将 BM25、类型权重、freshness、vector similarity 合成排序。
+4. 当前适合本地 MVP；生产模型 embedding 是后续增强。
 
 ### Hybrid Search
 
@@ -488,7 +535,7 @@ Server 支持 JSON-RPC over stdio（`atlas serve`）和 HTTP（`atlas serve-http
 4. 复核结果写入 `memory_reviews`，同步更新记忆状态和 `updated_at`。
 5. ATLAS 只保存决策与证据，不假装自动理解语义。
 
-## 5. 边界与错误处理
+## 6. 边界与错误处理
 
 1. 配置不存在或非法时，`init` / `index` / `serve` 立即失败并给出明确错误。
 2. 解析失败的文件记录为无符号，不阻断整体索引。
@@ -506,7 +553,7 @@ Server 支持 JSON-RPC over stdio（`atlas serve`）和 HTTP（`atlas serve-http
 14. Agent Budget 超限时终止运行并记录 failed。
 15. HTTP Server 默认绑定 127.0.0.1；设置 `ATLAS_HTTP_TOKEN` 后未认证请求返回 401。
 
-## 6. 安全与权限
+## 7. 安全与权限
 
 1. 索引和查询默认只读。
 2. 数据库、scope token 和审批状态保存在项目 `.atlas/` 目录内。
@@ -516,7 +563,37 @@ Server 支持 JSON-RPC over stdio（`atlas serve`）和 HTTP（`atlas serve-http
 6. LLM API key 只从环境变量读取，不写入 config。
 7. 记忆复核、审批、补丁应用、Agent 运行和 Router 评估写入审计。
 
-## 7. 验收清单
+## 8. 质量门槛
+
+### 7.1 本地 CI
+
+1. `pytest -q` 必须通过。
+2. `git diff --check` 必须通过。
+3. 新功能必须有测试。
+4. 新增 CLI / MCP 能力必须更新 README。
+5. 行为或 schema 变化必须更新 design / roadmap / HANDOFF。
+
+### 7.2 真实项目验收
+
+| 类别 | 最低要求 |
+| --- | --- |
+| 多语言仓库 | 覆盖至少 3 种语言 |
+| 仓库规模 | 覆盖 20+ 仓库或 500+ 文件 |
+| golden set | 50 个已知调用关系 |
+| Agent set | 20 条真实开发者问题 |
+| impact set | 10 个真实变更影响场景 |
+| 报告 | precision / recall / p95 / failure rate |
+
+### 7.3 安全验收
+
+1. scope token 拒绝过期、撤销、范围外路径。
+2. symlink 逃逸被拒绝。
+3. patch test command 只能命中 allowlist。
+4. PR 发布只在 approved 状态下执行。
+5. 高危动作写入 approval / audit。
+6. LLM API key 不写入配置。
+
+## 9. 验收清单
 
 ### 基础
 
@@ -598,13 +675,37 @@ Server 支持 JSON-RPC over stdio（`atlas serve`）和 HTTP（`atlas serve-http
 - [x] approved patch / sandbox test workflow。
 - [x] 策略蒸馏与离线变体评分。
 - [x] HTTP JSON-RPC Server。
+- [x] relative import resolver。
+- [x] call edge confidence downgrade。
+- [x] signature change detection。
+- [x] symlink escape protection。
+- [x] patch test command allowlist。
+- [x] Git worktree publication。
+- [x] MCP input schema validation。
+- [x] trace_id / metrics / daemon lock / backoff。
+- [x] structured memory fields。
+- [x] local vector embeddings。
 
-## 8. 后续演进
+## 10. 已知限制
 
-1. 用 tree-sitter 或语言服务替换基础正则解析器。
-2. 增加 embedding / hybrid search。
-3. 扩展 PR / Git remote 集成。
-4. 将文件监听从轮询升级为 OS event。
-5. 为 LLM Worker 建立真实项目评估集。
-6. 将 accepted variants 的人类提升流程自动化。
+| 限制 | 说明 | 影响 |
+| --- | --- | --- |
+| 引用 unresolved 率仍较高 | 自项目 unresolved call edge 占比约 66.8% | impact precision 受限 |
+| semantic claim 有模板词 | 确定性摘要会包含结构模板字段 | semantic precision 偏低 |
+| 单机索引 | SQLite 不适合多人并发共享 | 团队共享需远端服务 |
+| tree-sitter 覆盖有限 | 主要抽取 symbols，imports/calls 仍部分使用规则 | 复杂语法可能漏抽 |
+| 无模型 embedding | 当前使用 hashed embedding | 语义泛化能力弱于模型 embedding |
+| 无 CI 回写 | PR 创建后未同步 CI 状态 | 发布闭环不完整 |
+| License 未选定 | 尚未添加 LICENSE | 不适合正式开源发布 |
+
+## 11. 后续演进
+
+1. 建立多语言真实仓库 golden set。
+2. 用真实 LLM Provider 评估 Worker 质量。
+3. 提升 Python / TS / Java / Go / Rust 引用 resolver 精度。
+4. 引入模型 embedding，替换 hashed embedding。
+5. 支持 SQLite remote / PostgreSQL / 多人共享索引。
+6. 增加 RBAC / SSO / 远端部署。
+7. 回写 CI 结果并支持 PR review bot。
+8. 增加 canary / auto rollback 的进化策略。
 

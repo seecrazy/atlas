@@ -17,7 +17,15 @@ ATLAS 不要求把整仓源码塞进模型上下文；它先构建可验证的�
 
 ## 当前状态
 
-版本：`0.2.0`
+| 状态 | 说明 |
+| --- | --- |
+| 版本 | `0.2.0` |
+| 阶段 | 本地生产可用 MVP |
+| 运行面 | CLI、MCP stdio、MCP HTTP |
+| 存储 | 本地 SQLite / WAL |
+| 代码智能 | Python AST + 多语言 tree-sitter / lightweight parser |
+| 质量门槛 | `pytest`、`doctor`、Router / Agent / Semantic evaluation |
+| 部署形态 | 单机本地服务，不是多用户共享服务 |
 
 当前已实现：
 
@@ -37,6 +45,53 @@ ATLAS 不要求把整仓源码塞进模型上下文；它先构建可验证的�
 - 离线进化评估、策略提升与回滚
 
 在真实大仓使用前，建议运行 `atlas doctor`、`atlas index` 和 `atlas evaluate`，确认解析覆盖率、影响准确率和性能。
+
+## 目录
+
+1. [当前状态](#当前状态)
+2. [谁适合使用](#谁适合使用)
+3. [设计原则](#设计原则)
+4. [系统结构](#系统结构)
+5. [安装](#安装)
+6. [快速开始](#快速开始)
+7. [配置](#配置)
+8. [CLI 速查](#cli-速查)
+9. [MCP](#mcp)
+10. [典型工作流](#典型工作流)
+11. [质量与基准](#质量与基准)
+12. [LLM Worker](#llm-worker)
+13. [安全模型](#安全模型)
+14. [故障排查](#故障排查)
+15. [文档](#文档)
+16. [开发与贡献](#开发与贡献)
+17. [Roadmap](#roadmap)
+18. [License](#license)
+
+## 谁适合使用
+
+### 适合
+
+- 架构师需要理解多仓依赖、契约和影响范围。
+- 平台团队要把代码结构、语义记忆和安全审批接入 AI Agent。
+- 开发者在本地 IDE / CLI 中定位调用方、影响范围和上下文。
+- 企业想在执行补丁前保留人类审批和可审计边界。
+
+### 不适合
+
+- 需要多用户共享同一份索引的在线服务。
+- 需要全公司权限集成、SSO、RBAC 的场景。
+- 需要跨机器实时索引同步的场景。
+- 希望直接把整仓代码交给模型、不需要结构索引的场景。
+
+## 设计原则
+
+1. **结构优先**：先索引确定性事实，再让模型推理。
+2. **证据优先**：finding 必须绑定文件和行号。
+3. **分层隔离**：架构、系统、模块、实现各看各的上下文。
+4. **权限服务端校验**：scope token 不依赖客户端自觉。
+5. **安全闭环**：补丁必须经过 propose → approve → apply。
+6. **可观测**：路由、Agent、补丁、发布和策略变更都可审计。
+7. **LLM 可选**：无模型时使用确定性 Worker，有模型时增强推理。
 
 ## 系统结构
 
@@ -424,6 +479,49 @@ atlas evaluate /path/to/project
 6. PR 发布使用临时 Git worktree。
 7. 审批、读取、补丁、发布和策略变更写入审计。
 
+## 质量与基准
+
+ATLAS 自项目已完成基础评估，完整结果见 [ATLAS Self Evaluation](docs/evaluation/ATLAS_SELF.md)。
+
+| 指标 | 基线 |
+| --- | ---: |
+| Router intent accuracy | 1.0000 |
+| Router role accuracy | 1.0000 |
+| Agent hit rate | 1.0000 |
+| Agent evidence coverage | 1.0000 |
+| Semantic recall | 0.9524 |
+| Semantic precision | 0.4778 |
+| Semantic F1 | 0.6126 |
+
+这个结果证明链路可用，但 semantic precision 仍受确定性模板影响；进入真实大仓前应建立 golden set。
+
+### 必测指标
+
+| 指标 | 目的 |
+| --- | --- |
+| symbol recall | 确认目标符号是否被索引 |
+| reference precision / recall | 衡量引用边质量 |
+| unresolved ratio | 发现 import / call resolver 短板 |
+| impact precision | 衡量影响分析误报率 |
+| agent hit rate | 衡量 Agent 是否命中目标符号 |
+| evidence coverage | 衡量 finding 是否可追溯 |
+| index time | 衡量全量 / 增量索引成本 |
+| MCP p95 | 衡量查询延迟 |
+| daemon CPU / IO | 衡量后台成本 |
+
+## 故障排查
+
+| 症状 | 处理 |
+| --- | --- |
+| `doctor` 显示 FTS5 unavailable | 确认 SQLite 编译包含 FTS5 |
+| `tree_sitter not installed` | 安装 `.[deep-parser]` |
+| `watchfiles not installed` | 使用轮询 daemon 或安装 `.[watch]` |
+| daemon 无法启动 | 检查 `.atlas/daemon.lock` 是否有活进程持有 |
+| 引用大量 unresolved | 先建立 import resolver golden set，再运行 `atlas index --full` |
+| `gh` 不可用 | PR 功能需要安装并登录 GitHub CLI |
+| schema_version 过低 | 运行 `atlas index` 触发迁移 |
+| 结果过旧 | 运行 `atlas index --full` 后重新评估 |
+
 ## 文档
 
 | 文档 | 内容 |
@@ -436,6 +534,8 @@ atlas evaluate /path/to/project
 | [ADR 0003](docs/adr/0003-deterministic-end-to-end-pipeline.md) | 端到端 Pipeline |
 | [ADR 0004](docs/adr/0004-kernel-agents-and-approved-changes.md) | Kernel / Agent / 补丁 |
 | [交接记录](docs/HANDOFF.md) | 当前实现与下一步 |
+| [CONTRIBUTING](CONTRIBUTING.md) | 开发与提交要求 |
+| [SECURITY](SECURITY.md) | 支持范围与漏洞报告 |
 
 ## 开发
 
@@ -445,3 +545,46 @@ python3 -m pytest -q
 ```
 
 当前测试覆盖索引、解析、引用、影响、搜索、Agent、Kernel、补丁、进化、运维和 MCP。
+
+### 本地命令
+
+```bash
+# 安装开发环境
+python3 -m pip install -e '.[production]'
+
+# 运行测试
+python3 -m pytest -q
+
+# 自检
+PYTHONPATH=src python3 -m atlas.cli doctor .
+
+# 自项目评估
+PYTHONPATH=src python3 -m atlas.cli index . --full
+PYTHONPATH=src python3 -m atlas.cli evaluate . --no-llm
+```
+
+## 贡献
+
+提交前请检查：
+
+1. `python3 -m pytest -q` 通过。
+2. `git diff --check` 无空白错误。
+3. 新功能有测试。
+4. 用户可见行为已更新 README。
+5. 设计变化已同步 `docs/design.md`。
+6. 完成状态已同步 `docs/roadmap.md`。
+7. 交接要点已同步 `docs/HANDOFF.md`。
+
+## Roadmap
+
+详见 [Roadmap](docs/roadmap.md)。当前重点是：
+
+1. 多语言真实仓库 golden set。
+2. LLM Worker 真实项目评估。
+3. 引用 resolver 的 precision / recall 提升。
+4. 大规模索引性能基准。
+5. 远端 / 多人共享部署形态。
+
+## License
+
+License 尚未正式选定。如果准备开源发布，建议选择 MIT 或 Apache-2.0，并补齐 LICENSE 文件。

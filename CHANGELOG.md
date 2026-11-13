@@ -19,6 +19,20 @@
 - 健康度报告和生产评估 harness。
 - OS event watchfiles daemon。
 - CI 与打包配置。
+- Python relative import resolver。
+- TS / JS relative path resolver。
+- call edge confidence downgrade。
+- symbol signature hash 和 `signature_changed`。
+- scoped file read symlink escape protection。
+- patch test command allowlist。
+- Git worktree publication。
+- MCP input schema validation。
+- trace_id、run_metrics、daemon lock 和 exponential backoff。
+- doctor、audit retention 和 health 扩展。
+- 语义记忆 structured fields。
+- 本地向量 embedding 和 vector search。
+- shadow evaluation、utility decay 和策略提升 / 回滚审批。
+- CONTRIBUTING 与 SECURITY 文档。
 
 ## 0.1.0
 

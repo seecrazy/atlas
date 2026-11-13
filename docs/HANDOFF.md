@@ -2,80 +2,198 @@
 
 ## 最近更新
 
-2026-11-12
+2026-11-13
 
 ## 当前结论
 
-ATLAS 第一版先交付「可验证项目知识库 + MCP」，不先做完整四层 Agent。原因如下：
+ATLAS 已完成本地生产可用 MVP。核心链路已经闭环：
 
-1. Agent 路由质量依赖底层索引准确率。
-2. 没有可观察的符号/引用/影响数据前，难以评估路由是否正确。
-3. scope 权限必须在服务端可验证，不能只靠提示词或客户端行为。
-4. 语义记忆必须带证据和状态，否则会污染 Agent 上下文。
-5. 进化闭环必须离线且有冻结验证集，不能直接进入运行时。
+```text
+Index → Search / Memory → Router → Context → Agent → Convergence → Patch → Publish
+```
 
-## 已实现
+当前版本：`0.2.0`
+当前 schema：`9`
+当前测试：58 passed
 
-项目位于 `atlas/` 目录。
+ATLAS 不应被描述为“只能做基础索引”。它现在具备：
 
-已实现 Phase 1 与 Phase 2 第一批能力：
+1. 多语言结构索引与可选 tree-sitter。
+2. FTS5 + 本地向量搜索。
+3. 架构契约与文档知识源。
+4. 语义记忆和 stale 复核。
+5. 四层 Agent 和 scoped source read。
+6. Kernel Budget 与审批。
+7. 审批补丁和 Git worktree 发布。
+8. trace_id、metrics、daemon lock、backoff。
+9. 离线进化和策略提升 / 回滚。
 
-1. `.atlas/config.json` 项目配置。
-2. `.atlas/index.db` SQLite 数据库。
-3. Python AST 抽取。
-4. TypeScript/JavaScript 基础抽取。
-5. 符号、引用、文件、记忆、scope、audit 表。
-6. MCP stdio 工具。
-7. scope token 与路径过滤。
-8. pytest 测试。
-9. Go / Java 基础符号索引。
-10. Git-aware 提交间增量索引。
-11. 文件级索引诊断。
-12. Rust 基础索引。
-13. 引用边解析、置信度、跨仓标识和去重。
-14. schema 版本 3、旧库列迁移和记忆复核表。
-15. 确定性 Router 原型与 `atlas_route`。
-16. 影响分析置信度过滤。
-17. 记忆检索与复核闭环。
-18. 系统 / 模块 / 开发三层结构化上下文包。
-19. 两级影响传播链。
-20. 上行回溯汇聚格式。
-21. 未提交工作区变更检测。
-22. Markdown / JSON 健康度报告。
-23. 20 条 Router 冻结验证集与 accuracy 指标。
-24. 导出符号变更传播报告。
-25. Router -> Context -> Worker -> Convergence 端到端命令。
-26. 前台增量守护循环。
-27. Schema v5：agent runs、approvals、patches、contracts、architecture docs、semantic generations、strategy rules、evolution variants。
-28. 四层 Agent、scoped source read、Kernel Budget、private score。
-29. 语义记忆生成、stale auto-review、revert lessons。
-30. 架构契约、契约影响、架构文档/ADR 索引。
-31. propose → approve → apply 补丁工作流。
-32. 策略蒸馏、离线变体评分、HTTP JSON-RPC Server。
-33. 并行解析和基础 call edge 抽取。
-34. tree-sitter 深度解析后端。
-35. SQLite FTS5 hybrid search。
-36. OS event watchfiles daemon。
-37. Git / PR 发布工作流。
-38. 生产评估 harness。
-39. 变体提升 / 回滚审批。
+## 关键边界
+
+ATLAS 当前是单机本地系统：
+
+1. 索引存储在项目 `.atlas/index.db`。
+2. 不适合多用户共享同一份在线索引。
+3. 没有 RBAC / SSO / 多租户隔离。
+4. PR / Git remote 功能依赖本机 git 和 gh。
+5. 还没有真实大仓、多语言 golden set 和 LLM Provider 质量评估。
+
+## 已实现能力
+
+### 索引与代码智能
+
+1. 多仓注册和 subsystem → repo 映射。
+2. Python AST 解析。
+3. TypeScript / JavaScript / Go / Java / Rust 基础解析。
+4. 可选 tree-sitter deep parser。
+5. 并行文件解析。
+6. Git commit diff + workspace diff。
+7. 增量索引和全量重建。
+8. 文件级诊断。
+9. 符号 signature hash。
+10. 导出 API 变更检测。
+11. Python relative import resolver。
+12. TS / JS relative path resolver。
+13. import / call edge 置信度。
+
+### 搜索与记忆
+
+1. SQLite FTS5 hybrid search。
+2. 本地 hashed embedding。
+3. vector search。
+4. 文件 / repo / subsystem 语义记忆。
+5. memory structured fields。
+6. memory utility score。
+7. stale memory 自动复核。
+8. Git revert lessons。
+
+### 架构知识
+
+1. architecture contracts。
+2. contract provider / version / consumers。
+3. contract impact analysis。
+4. architecture docs / ADR / API 文档索引。
+5. doc 分类与 hybrid retrieval。
+
+### Agent 与 Kernel
+
+1. 确定性 Router。
+2. system / module / developer context packets。
+3. 四层 Agent。
+4. scoped physical file read。
+5. Kernel Budget。
+6. approval workflow。
+7. evidence verifier。
+8. private score。
+9. OpenAI-compatible LLM Provider。
+10. LLM 失败自动回退。
+
+### 代码修改与发布
+
+1. patch propose。
+2. human approve。
+3. patch apply。
+4. test command allowlist。
+5. target path containment。
+6. symlink escape protection。
+7. temporary Git worktree publication。
+8. branch / commit / push / PR。
+9. publication audit。
+
+### 运维
+
+1. trace_id。
+2. run_metrics。
+3. daemon lock。
+4. daemon exponential backoff。
+5. watchfiles OS event watcher。
+6. health / report。
+7. doctor。
+8. audit retention。
+9. metrics retention。
+10. MCP HTTP auth / body limit / rate limit。
+
+### 进化
+
+1. strategy distillation。
+2. variant scoring。
+3. shadow evaluation。
+4. utility decay。
+5. promotion approval。
+6. rollback approval。
+7. active strategy rules。
+
+## 当前质量基线
+
+ATLAS 自项目评估结果：
+
+| 指标 | 值 |
+| --- | ---: |
+| Router intent accuracy | 1.0000 |
+| Router role accuracy | 1.0000 |
+| Agent hit rate | 1.0000 |
+| Agent evidence coverage | 1.0000 |
+| Semantic recall | 0.9524 |
+| Semantic precision | 0.4778 |
+| Semantic F1 | 0.6126 |
+
+自项目也暴露出引用 unresolved 率仍然较高，因此下一步不是继续堆功能，而是建立真实大仓 golden set。
 
 ## 下一步
 
-1. 构建 10 个真实调用关系的验收用例。
-2. 在真实大仓验证工作区检测成本和边界。
-3. 在真实大仓验证 tree-sitter、hybrid search、daemon 和 PR 工作流。
-4. 用真实项目验证 ambiguous 引用的干扰率。
-5. 在真实大仓验证 Router accuracy、导出传播和 daemon 成本。
-6. 用真实大仓评估 LLM Worker、语义记忆和影响传播质量。
+### Phase 7：真实项目验证
+
+1. 选择真实多语言仓库。
+2. 建立 golden set。
+3. 测量 reference precision / recall。
+4. 测量 impact precision / recall。
+5. 测量 index / MCP / Agent 性能。
+6. 输出可复现评估报告。
+
+### Phase 8：LLM Worker 实测
+
+1. 配置真实 OpenAI-compatible Provider。
+2. 对同一问题集运行 deterministic 与 LLM。
+3. 测量 correctness、hallucination rate、cost、latency。
+4. 对比 evidence coverage 和 fallback 率。
+5. 生成评估报告。
+
+### Phase 9：引用 resolver 升级
+
+1. Python module / symbol resolver。
+2. TS / JS paths resolver。
+3. Go package resolver。
+4. Java class resolver。
+5. Rust crate / module resolver。
+6. unresolved reason 分类。
+
+### Phase 10：企业运行形态
+
+1. 远端索引服务。
+2. 索引快照。
+3. 多用户只读访问。
+4. RBAC / SSO。
+5. audit export。
+6. CI 回写。
 
 ## 阅读顺序
 
 1. `README.md`
 2. `docs/design.md`
 3. `docs/roadmap.md`
-4. `docs/adr/0001-local-sqlite-and-mcp.md`
-5. `docs/adr/0002-deterministic-router-first.md`
-6. `docs/adr/0003-deterministic-end-to-end-pipeline.md`
-7. `docs/adr/0004-kernel-agents-and-approved-changes.md`
+4. `docs/evaluation/ATLAS_SELF.md`
+5. `docs/adr/0001-local-sqlite-and-mcp.md`
+6. `docs/adr/0002-deterministic-router-first.md`
+7. `docs/adr/0003-deterministic-end-to-end-pipeline.md`
+8. `docs/adr/0004-kernel-agents-and-approved-changes.md`
 
+## 常用验收命令
+
+```bash
+python3 -m pytest -q
+PYTHONPATH=src python3 -m atlas.cli doctor .
+PYTHONPATH=src python3 -m atlas.cli index . --full
+PYTHONPATH=src python3 -m atlas.cli validate-router .
+PYTHONPATH=src python3 -m atlas.cli evaluate . --no-llm
+PYTHONPATH=src python3 -m atlas.cli propagate .
+```
